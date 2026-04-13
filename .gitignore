@@ -3,3 +3,5 @@
 *.pdf
 *.db
 agent_profile.json
+qa_memory.json
+credentials.json

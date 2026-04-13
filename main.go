@@ -75,7 +75,7 @@ func main() {
 					review, _ := ReviewCV(scrapedText, draft)
 					attempts := 1
 
-					for review != nil && !review.Approved && attempts <= 2 {
+					for review != nil && !review.Approved && attempts <= 3 {
 						fmt.Printf("   ⚠️  Critic rejected draft for %s (Score: %d/10). Writer revising...\n", evaluation.Company, review.Score)
 						fmt.Println("   ✍️  [AI Writer] Revising tailored CV...")
 						draft, _ = TailorCV(scrapedText, myCV, review.Feedback)
@@ -91,7 +91,11 @@ func main() {
 						GeneratePDF(pw, draft, pdfName)
 						finalCV = draft
 					} else {
-						fmt.Printf("   ❌ Critic gave up on %s. Draft not approved (No PDF generated).\n", evaluation.Company)
+						fmt.Printf("   ⚠️  Critic did not fully approve %s. Using best-effort draft anyway.\n", evaluation.Company)
+						if draft != nil {
+							GeneratePDF(pw, draft, pdfName)
+							finalCV = draft
+						}
 					}
 				}
 

@@ -48,8 +48,8 @@ func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitG
 				review, _ := ReviewCV(text, draft)
 				attempts := 1
 
-				// If the Critic rejects it, loop and force a rewrite! (Max 2 rewrites)
-				for review != nil && !review.Approved && attempts <= 2 {
+				// If the Critic rejects it, loop and force a rewrite! (Max 3 rewrites)
+				for review != nil && !review.Approved && attempts <= 3 {
 					fmt.Printf("   ⚠️  [Worker %d] Critic rejected draft for %s (Score: %d/10). Writer revising...\n", id, eval.Company, review.Score)
 					fmt.Printf("   ✍️  [Worker %d] AI Writer revising CV...\n", id)
 					draft, _ = TailorCV(text, cv, review.Feedback)
@@ -64,7 +64,8 @@ func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitG
 					fmt.Printf("   ✨ [Worker %d] Critic APPROVED final draft for %s!\n", id, eval.Company)
 					finalCV = draft
 				} else {
-					fmt.Printf("   ❌ [Worker %d] Critic gave up on %s. Draft not approved.\n", id, eval.Company)
+					fmt.Printf("   ⚠️  [Worker %d] Critic did not approve %s. Using best-effort draft.\n", id, eval.Company)
+					finalCV = draft
 				}
 			}
 		}

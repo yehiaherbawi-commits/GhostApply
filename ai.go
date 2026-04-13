@@ -89,7 +89,7 @@ func EvaluateJob(jobText string, myCV string) (*Evaluation, error) {
 	client, _ := genai.NewClient(ctx, option.WithAPIKey(apiKey))
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.5-flash")
+	model := client.GenerativeModel("gemini-2.5-pro")
 	model.ResponseMIMEType = "application/json"
 
 	systemInstruction := `You are an expert recruiter.
@@ -115,7 +115,7 @@ func TailorCV(jobText string, myCV string, previousFeedback string) (*CVContent,
 	client, _ := genai.NewClient(ctx, option.WithAPIKey(apiKey))
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.5-flash")
+	model := client.GenerativeModel("gemini-2.5-pro")
 	model.ResponseMIMEType = "application/json"
 
 	systemInstruction := `You are an ATS expert. Extract 'name', 'email', 'phone', 'linkedin', 'location', and 'role' from the CV. 
@@ -148,15 +148,16 @@ func ReviewCV(jobText string, draftCV *CVContent) (*CriticReview, error) {
 	client, _ := genai.NewClient(ctx, option.WithAPIKey(apiKey))
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.5-flash")
+	model := client.GenerativeModel("gemini-2.5-pro")
 	model.ResponseMIMEType = "application/json"
 
-	systemInstruction := `You are a ruthless Hiring Manager reviewing an ATS-optimized resume draft against a Job Description.
-	Look for hallucinated skills, weak action verbs, or missed keyword opportunities. 
+	systemInstruction := `You are a strict but fair Hiring Manager reviewing an ATS-optimized resume draft against a Job Description.
+	Look for hallucinated skills (skills the candidate does NOT have in their original CV), weak action verbs, or missed keyword opportunities.
+	IMPORTANT: Do NOT penalize the candidate for skills they genuinely lack. Only penalize if the Writer fabricated skills not present in the original CV.
 	Output a JSON object with EXACTLY these keys:
 	- 'score': (Integer 0 to 10)
 	- 'feedback': (A string detailing exactly what the writer must fix)
-	- 'approved': (Boolean. True ONLY if score is 8 or higher).`
+	- 'approved': (Boolean. True if score is 6 or higher).`
 	model.SystemInstruction = &genai.Content{Parts: []genai.Part{genai.Text(systemInstruction)}}
 
 	draftJSON, _ := json.Marshal(draftCV)
@@ -179,7 +180,7 @@ func DraftApplicationAnswers(browser playwright.Browser, jobText string, myCV st
 	client, _ := genai.NewClient(ctx, option.WithAPIKey(apiKey))
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.5-flash")
+	model := client.GenerativeModel("gemini-2.5-pro")
 	model.ResponseMIMEType = "application/json"
 
 	// 1. Give the AI "Hands" (Define the Tool)
@@ -267,7 +268,7 @@ func AIFinishApplication(formHTML string, profileJSON string) (*AIActionPlan, er
 	client, _ := genai.NewClient(ctx, option.WithAPIKey(apiKey))
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.5-flash")
+	model := client.GenerativeModel("gemini-2.5-pro")
 	model.ResponseMIMEType = "application/json"
 
 	systemInstruction := `You are an intelligent browser automation agent evaluating an ATS application form.
