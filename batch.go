@@ -7,76 +7,97 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/playwright-community/playwright-go"
 )
 
-// JobResult bundles everything together so the workers can send it down the channel
+// UPGRADED: Channel payload now carries the final approved CV
 type JobResult struct {
-	URL     string
-	Eval    *Evaluation
-	RawText string // We keep the raw text so we don't have to scrape twice for the PDF
-	Error   error
+	URL        string
+	Eval       *Evaluation
+	TailoredCV *CVContent
+	Error      error
 }
 
-// The Worker function runs concurrently, grabbing URLs from the jobs channel
-func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitGroup, cv string) {
+func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitGroup, cv string, browser playwright.Browser) {
 	defer wg.Done()
 
 	for url := range jobs {
 		fmt.Printf("⚡ [Worker %d] Processing: %s\n", id, url)
 
-		// 1. Scrape
-		text, err := ScrapeJob(url)
+		text, err := ScrapeJob(browser, url)
 		if err != nil {
 			results <- JobResult{URL: url, Error: fmt.Errorf("scrape failed: %v", err)}
 			continue
 		}
 
-		// 2. Evaluate
 		eval, err := EvaluateJob(text, cv)
 		if err != nil {
 			results <- JobResult{URL: url, Error: fmt.Errorf("eval failed: %v", err)}
 			continue
 		}
 
-		// 3. Send Success Result to the channel
-		results <- JobResult{URL: url, Eval: eval, RawText: text}
+		var finalCV *CVContent
+
+		// MULTI-AGENT LOOP
+		if eval.Score >= 4.0 {
+			fmt.Printf("   ✍️  [Worker %d] AI Writer drafting tailored CV...\n", id)
+			draft, _ := TailorCV(text, cv, "")
+			if draft != nil {
+				fmt.Printf("   🕵️  [Worker %d] AI Critic reviewing draft...\n", id)
+				review, _ := ReviewCV(text, draft)
+				attempts := 1
+
+				// If the Critic rejects it, loop and force a rewrite! (Max 2 rewrites)
+				for review != nil && !review.Approved && attempts <= 2 {
+					fmt.Printf("   ⚠️  [Worker %d] Critic rejected draft for %s (Score: %d/10). Writer revising...\n", id, eval.Company, review.Score)
+					fmt.Printf("   ✍️  [Worker %d] AI Writer revising CV...\n", id)
+					draft, _ = TailorCV(text, cv, review.Feedback)
+					if draft != nil {
+						fmt.Printf("   🕵️  [Worker %d] AI Critic reviewing revised draft...\n", id)
+						review, _ = ReviewCV(text, draft)
+					}
+					attempts++
+				}
+
+				if review != nil && review.Approved {
+					fmt.Printf("   ✨ [Worker %d] Critic APPROVED final draft for %s!\n", id, eval.Company)
+					finalCV = draft
+				} else {
+					fmt.Printf("   ❌ [Worker %d] Critic gave up on %s. Draft not approved.\n", id, eval.Company)
+				}
+			}
+		}
+
+		results <- JobResult{URL: url, Eval: eval, TailoredCV: finalCV}
 	}
 }
 
-// RunBatch is the main dispatcher
-func RunBatch(db *sql.DB, filePath string, cv string) {
+func RunBatch(pw *playwright.Playwright, browser playwright.Browser, db *sql.DB, filePath string, cv string) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		fmt.Printf("❌ Could not open batch file: %v\n", err)
 		return
 	}
 	defer file.Close()
 
-	// Read all URLs into a list
 	var urls []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		url := strings.TrimSpace(scanner.Text())
-		if url != "" && !strings.HasPrefix(url, "#") { // Ignore empty lines and comments
+		if url != "" && !strings.HasPrefix(url, "#") {
 			urls = append(urls, url)
 		}
 	}
 
-	if len(urls) == 0 {
-		fmt.Println("⚠️ No URLs found in targets.txt")
-		return
-	}
+	fmt.Printf("\n--- 🌀 STARTING MULTI-AGENT FACTORY (%d URLs) ---\n", len(urls))
 
-	fmt.Printf("\n--- 🌀 STARTING BATCH FACTORY (%d URLs) ---\n", len(urls))
-
-	// 1. Create our communication channels
 	jobs := make(chan string, len(urls))
 	results := make(chan JobResult, len(urls))
 
 	var wg sync.WaitGroup
 	var dbWg sync.WaitGroup
 
-	// 2. Start the Database Listener (Only ONE of these to prevent SQLite locking!)
+	// The Database Listener (Safe & Fast)
 	dbWg.Add(1)
 	go func() {
 		defer dbWg.Done()
@@ -86,41 +107,30 @@ func RunBatch(db *sql.DB, filePath string, cv string) {
 				continue
 			}
 
-			// Save to SQLite
 			SaveApplication(db, res.Eval.Company, res.Eval.Role, res.Eval.Score, res.Eval.Status, res.URL)
 			fmt.Printf("✅ [Logged] %s - %s (Score: %.1f)\n", res.Eval.Company, res.Eval.Role, res.Eval.Score)
 
-			// Generate PDF if it's a high score
-			if res.Eval.Score >= 4.0 {
-				tailored, err := TailorCV(res.RawText, cv)
-				if err == nil {
-					// Clean up the company name for the file name
-					safeName := strings.ReplaceAll(res.Eval.Company, " ", "_")
-					pdfName := fmt.Sprintf("Resume_%s.pdf", safeName)
-					GeneratePDF(tailored, pdfName)
-				}
+			// Generate the PDF using the pre-approved CV from the worker!
+			if res.TailoredCV != nil {
+				safeName := strings.ReplaceAll(res.Eval.Company, " ", "_")
+				GeneratePDF(pw, res.TailoredCV, fmt.Sprintf("Resume_%s.pdf", safeName))
 			}
 		}
 	}()
 
-	// 3. Spin up the Worker Pool (5 Concurrent AI Agents)
 	numWorkers := 5
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
-		go worker(w, jobs, results, &wg, cv)
+		go worker(w, jobs, results, &wg, cv, browser)
 	}
 
-	// 4. Dispatch the jobs into the channel
 	for _, url := range urls {
 		jobs <- url
 	}
-	close(jobs) // Tell the workers no more jobs are coming
+	close(jobs)
 
-	// 5. Wait for all workers to finish their current tasks
 	wg.Wait()
-	close(results) // Tell the Database Listener no more results are coming
-
-	// 6. Wait for the Database Listener to finish saving the last few items
+	close(results)
 	dbWg.Wait()
 
 	fmt.Println("\n--- ✅ BATCH COMPLETE ---")

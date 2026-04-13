@@ -7,14 +7,10 @@ import (
 )
 
 // GeneratePDF takes the tailored content and saves it as a PDF file
-func GeneratePDF(content *CVContent, filename string) error {
-	pw, err := playwright.Run()
-	if err != nil {
-		return err
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch()
+func GeneratePDF(pw *playwright.Playwright, content *CVContent, filename string) error {
+	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		Headless: playwright.Bool(true),
+	})
 	defer browser.Close()
 
 	page, _ := browser.NewPage()
@@ -50,7 +46,7 @@ func GeneratePDF(content *CVContent, filename string) error {
 	page.SetContent(htmlTemplate)
 
 	// Print to PDF
-	_, err = page.PDF(playwright.PagePdfOptions{
+	_, err := page.PDF(playwright.PagePdfOptions{
 		Path:            playwright.String(filename),
 		Format:          playwright.String("A4"),
 		PrintBackground: playwright.Bool(true),

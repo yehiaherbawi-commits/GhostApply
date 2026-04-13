@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/joho/godotenv"
+	"github.com/playwright-community/playwright-go"
 )
 
 func main() {
@@ -17,33 +18,37 @@ func main() {
 	cvBytes, err := os.ReadFile("my_cv.txt")
 	if err != nil {
 		fmt.Println("⚠️  No 'my_cv.txt' found. Creating a template...")
-		templateCV := `Name: Your Name
-Location: Your City, Country
-Experience: 5 years as a Software Engineer.
-Education: BSc Computer Science
-Skills: Go, Python, SQL, REST APIs.
-`
-		os.WriteFile("my_cv.txt", []byte(templateCV), 0644)
-		fmt.Println("ℹ️  Please open 'my_cv.txt', fill in your actual resume details, and run the agent again.")
+		os.WriteFile("my_cv.txt", []byte("Name: \nLocation: \nExperience: \nSkills: \n"), 0644)
 		os.Exit(1)
 	}
 	myCV := string(cvBytes)
 
+	// Initialize Playwright ONCE for the entire application lifecycle!
+	pw, err := playwright.Run()
+	if err != nil {
+		log.Fatalf("Could not start Playwright: %v", err)
+	}
+	defer pw.Stop()
+
+	// Launch single Chromium instance for scraping
+	browser, err := pw.Chromium.Launch()
+	if err != nil {
+		log.Fatalf("Could not launch Chromium: %v", err)
+	}
+	defer browser.Close()
+
 	if len(os.Args) > 1 {
 		arg := os.Args[1]
 
-		// --- NEW: Route to the Goroutine factory if --batch is passed ---
 		if arg == "--batch" {
-			RunBatch(db, "targets.txt", myCV)
-
+			RunBatch(pw, browser, db, "targets.txt", myCV)
 			fmt.Println("\nPress Enter to open Dashboard...")
 			fmt.Scanln()
 		} else {
-			// --- EXISTING: Single URL Logic ---
 			targetURL := arg
 			fmt.Printf("\n🚀 AGENT ACTIVATED\nTarget: %s\n", targetURL)
 
-			scrapedText, err := ScrapeJob(targetURL)
+			scrapedText, err := ScrapeJob(browser, targetURL)
 			if err != nil {
 				log.Fatalf("Scraper error: %v", err)
 			}
@@ -58,20 +63,48 @@ Skills: Go, Python, SQL, REST APIs.
 			if evaluation.Score >= 4.0 {
 				fmt.Println("✨ High Score! Generating tailored materials...")
 
-				// Your safe error-handling block preserved perfectly
-				tailored, err := TailorCV(scrapedText, myCV)
+				pdfName := fmt.Sprintf("Resume_%s.pdf", evaluation.Company)
+				var finalCV *CVContent
+
+				fmt.Println("   ✍️  [AI Writer] Drafting tailored CV... (This takes a few seconds)")
+				draft, err := TailorCV(scrapedText, myCV, "")
 				if err != nil {
-					fmt.Printf("❌ Failed to tailor CV (Gemini Error): %v\n", err)
+					fmt.Printf("❌ Failed to tailor CV: %v\n", err)
 				} else {
-					GeneratePDF(tailored, fmt.Sprintf("Resume_%s.pdf", evaluation.Company))
+					fmt.Println("   🕵️  [AI Critic] Reviewing draft against Job Description...")
+					review, _ := ReviewCV(scrapedText, draft)
+					attempts := 1
+
+					for review != nil && !review.Approved && attempts <= 2 {
+						fmt.Printf("   ⚠️  Critic rejected draft for %s (Score: %d/10). Writer revising...\n", evaluation.Company, review.Score)
+						fmt.Println("   ✍️  [AI Writer] Revising tailored CV...")
+						draft, _ = TailorCV(scrapedText, myCV, review.Feedback)
+						if draft != nil {
+							fmt.Println("   🕵️  [AI Critic] Reviewing revised draft...")
+							review, _ = ReviewCV(scrapedText, draft)
+						}
+						attempts++
+					}
+
+					if review != nil && review.Approved {
+						fmt.Printf("   ✨ Critic APPROVED final draft for %s!\n", evaluation.Company)
+						GeneratePDF(pw, draft, pdfName)
+						finalCV = draft
+					} else {
+						fmt.Printf("   ❌ Critic gave up on %s. Draft not approved (No PDF generated).\n", evaluation.Company)
+					}
 				}
 
-				answers, err := DraftApplicationAnswers(scrapedText, myCV)
-				if err != nil {
-					fmt.Printf("❌ Failed to draft answers (Gemini Error): %v\n", err)
-				} else {
-					fmt.Println("\n📝 DRAFT ANSWERS:")
-					fmt.Printf("Why Us: %s\n", answers.WhyCompany)
+				fmt.Println("   💡 [AI Strategist] Drafting application answers...")
+				answers, err := DraftApplicationAnswers(browser, scrapedText, myCV, targetURL)
+				if err == nil {
+					fmt.Printf("\n📝 DRAFT ANSWERS:\nWhy Us: %s\n", answers.WhyCompany)
+				}
+
+				// --- NEW: THE FINAL BOSS ---
+				// If we successfully tailored the CV and generated a PDF, auto-fill the form!
+				if finalCV != nil {
+					AutoFillApplication(pw, targetURL, finalCV, pdfName, answers)
 				}
 			}
 
@@ -83,8 +116,5 @@ Skills: Go, Python, SQL, REST APIs.
 	}
 
 	p := tea.NewProgram(initialModel(db), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v", err)
-		os.Exit(1)
-	}
+	p.Run()
 }
