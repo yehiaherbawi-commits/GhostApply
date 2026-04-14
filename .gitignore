@@ -1,7 +1,20 @@
+# Environment and Secret files
 .env
-*.exe
-*.pdf
-*.db
 agent_profile.json
 qa_memory.json
 credentials.json
+
+# Binaries and executables
+*.exe
+JobAgent
+
+# Application data
+*.pdf
+*.db
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Go related
+vendor/
