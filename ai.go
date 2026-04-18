@@ -220,7 +220,9 @@ func DraftApplicationAnswers(browser playwright.Browser, jobText string, myCV st
 
 	// Turn 1: Send the prompt. The AI will reply with a request to run our tool.
 	resp, err := session.SendMessage(ctx, genai.Text(prompt))
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	// 3. The Interception: Check if the AI wants to use the tool
 	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
@@ -241,7 +243,9 @@ func DraftApplicationAnswers(browser playwright.Browser, jobText string, myCV st
 					Name:     "scrape_company_website",
 					Response: toolResult,
 				})
-				if err != nil { return nil, err }
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
