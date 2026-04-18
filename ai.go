@@ -118,7 +118,6 @@ func TailorCV(jobText string, myCV string, previousFeedback string) (*CVContent,
 
 	opts := []option.ClientOption{option.WithAPIKey(apiKey)}
 	opts = append(opts, genaiClientOptions...)
-
 	client, _ := genai.NewClient(ctx, opts...)
 	defer client.Close()
 
