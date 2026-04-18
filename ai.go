@@ -115,10 +115,9 @@ var genaiClientOptions []option.ClientOption
 func TailorCV(jobText string, myCV string, previousFeedback string) (*CVContent, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	ctx := context.Background()
-	
+
 	opts := []option.ClientOption{option.WithAPIKey(apiKey)}
 	opts = append(opts, genaiClientOptions...)
-	
 	client, _ := genai.NewClient(ctx, opts...)
 	defer client.Close()
 

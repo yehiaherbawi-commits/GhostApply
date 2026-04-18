@@ -101,7 +101,7 @@ func detectATS(page playwright.Page) string {
 		return "Ashby"
 	case strings.Contains(pageURL, "icims"):
 		return "iCIMS"
-	case strings.Contains(pageURL, "successfactors"):
+	case strings.Contains(pageURL, "successfactors") || strings.Contains(pageURL, "siemens-energy.com"):
 		return "SAP SuccessFactors"
 	}
 
@@ -112,6 +112,9 @@ func detectATS(page playwright.Page) string {
 	}
 	if strings.Contains(bodyText, "Powered by Lever") {
 		return "Lever"
+	}
+	if strings.Contains(bodyText, "SuccessFactors") {
+		return "SAP SuccessFactors"
 	}
 
 	return "Unknown"
@@ -405,19 +408,115 @@ type formField struct {
 // 1. Finds the field by visible label text on screen
 // 2. Determines the interactive element type
 // 3. Uses the appropriate fill strategy (type, click-to-reveal, toggle)
+// smartInject uses Playwright's Proximity XPath and a Click-to-Reveal fallback
+// to handle complex enterprise ATS platforms (like SuccessFactors) that heavily nest inputs and iframes.
 func smartInject(page playwright.Page, field formField, answer string) bool {
 	variants := getAnswerVariants(answer)
+	cleanLabel := strings.TrimSuffix(strings.TrimSpace(field.Label), "*")
+	cleanLabel = strings.TrimSpace(cleanLabel)
 
-	switch field.FieldType {
-	case "text", "textarea":
-		return visualFillText(page, field, answer)
-	case "dropdown":
-		return visualFillDropdown(page, field, variants)
-	case "radio":
-		return visualFillRadio(page, field, variants)
-	default:
-		return visualFillText(page, field, answer)
+	// 1. IFRAME AWARENESS: SuccessFactors uses child frames.
+	// Search main page and all child frames.
+	var frames []playwright.Frame
+	frames = append(frames, page.MainFrame())
+	frames = append(frames, page.MainFrame().ChildFrames()...)
+
+	for _, frame := range frames {
+		// Use Playwright Proximity XPath to find the interactive element directly following the label
+		// Note: we look for input, textarea, select OR role=combobox / role=listbox / role=radio
+		xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[self::input or self::textarea or @role='combobox' or @role='radio' or @role='listbox' or self::select][1]", cleanLabel)
+		target := frame.Locator(xpath).First()
+
+		count, _ := target.Count()
+		if count == 0 {
+			continue // Not found in this frame, try next
+		}
+
+		// Determine the type of the element
+		tagNameVal, err := target.Evaluate("el => el.tagName.toLowerCase()", nil)
+		if err != nil {
+			continue
+		}
+		tagName := tagNameVal.(string)
+		roleVal, _ := target.GetAttribute("role")
+
+		// Strategy: Fill Text
+		if tagName == "input" || tagName == "textarea" {
+			// If it's a radio or checkbox input, handle it differently if needed,
+			// but for now try to fill or handle based on type
+			inputType, _ := target.GetAttribute("type")
+			if inputType == "radio" || inputType == "checkbox" {
+				// Broad visual fill radio fallback or direct click
+				target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+				fmt.Printf("   ✅ [Proximity] Clicked input '%s' for answer '%s'\n", cleanLabel, answer)
+				return true
+			}
+
+			err := target.Fill(answer)
+			if err == nil {
+				fmt.Printf("   ✅ [Proximity] Filled text '%s' → '%s'\n", cleanLabel, answer)
+				return true
+			}
+		}
+
+		// Strategy: Native Select
+		if tagName == "select" {
+			_, err := target.SelectOption(playwright.SelectOptionValues{Labels: playwright.StringSlice(answer)})
+			if err == nil {
+				fmt.Printf("   ✅ [Proximity Select] '%s' → '%s'\n", cleanLabel, answer)
+				return true
+			}
+			// Try variants
+			for _, v := range variants {
+				_, err := target.SelectOption(playwright.SelectOptionValues{Labels: playwright.StringSlice(v)})
+				if err == nil {
+					fmt.Printf("   ✅ [Proximity Select Variant] '%s' → '%s'\n", cleanLabel, v)
+					return true
+				}
+			}
+		}
+
+		// Strategy: Click-to-Reveal Fallback (Combobox / Listbox)
+		if roleVal == "combobox" || roleVal == "listbox" {
+			// a. Click to force dropdown open
+			err := target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+			if err != nil {
+				continue
+			}
+
+			// b. Wait for React/Angular to render options
+			page.WaitForTimeout(500)
+
+			// c. Search page for exact text of answer
+			for _, v := range variants {
+				// Search inside the frame
+				optionLoc := frame.GetByText(v, playwright.FrameGetByTextOptions{Exact: playwright.Bool(true)}).First()
+				if optCount, _ := optionLoc.Count(); optCount > 0 {
+					if vis, _ := optionLoc.IsVisible(); vis {
+						// d. Click that exact text option
+						if clickErr := optionLoc.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)}); clickErr == nil {
+							fmt.Printf("   ✅ [Click-to-Reveal] '%s' → '%s'\n", cleanLabel, v)
+							return true
+						}
+					}
+				}
+			}
+
+			// e. Press Escape to close menu if not found
+			page.Keyboard().Press("Escape")
+			page.WaitForTimeout(300)
+		}
+
+		// Strategy: Role Radio
+		if roleVal == "radio" {
+			target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+			fmt.Printf("   ✅ [Proximity] Clicked radio '%s'\n", cleanLabel)
+			return true
+		}
 	}
+
+	fmt.Printf("   ⚠️  [Proximity] Could not inject answer for '%s'\n", cleanLabel)
+	return false
 }
 
 // ============================================================================
