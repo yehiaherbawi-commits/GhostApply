@@ -394,15 +394,6 @@ func findAndClickNext(page playwright.Page) bool {
 // VISUAL-FIRST FIELD SCANNER — Works on native AND custom ATS widgets
 // ============================================================================
 
-type formField struct {
-	Label     string   `json:"label"`     // Human-readable question text
-	FieldType string   `json:"fieldType"` // "text", "dropdown", "radio", "textarea", "checkbox"
-	TagName   string   `json:"tagName"`   // kept for backward compat with Phase 3 UI
-	Required  bool     `json:"required"`  // Whether the field is required
-	Options   []string `json:"options"`   // Available options (for select/radio)
-	Selector  string   `json:"selector"`  // Optional CSS selector hint (may be empty)
-}
-
 // smartInject fills a field using a visual-first approach.
 // It does NOT rely on CSS selectors or native HTML tags. Instead it:
 // 1. Finds the field by visible label text on screen
@@ -422,96 +413,99 @@ func smartInject(page playwright.Page, field formField, answer string) bool {
 	frames = append(frames, page.MainFrame().ChildFrames()...)
 
 	for _, frame := range frames {
-		// Use Playwright Proximity XPath to find the interactive element directly following the label
-		// Note: we look for input, textarea, select OR role=combobox / role=listbox / role=radio
-		xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[self::input or self::textarea or @role='combobox' or @role='radio' or @role='listbox' or self::select][1]", cleanLabel)
-		target := frame.Locator(xpath).First()
-
-		count, _ := target.Count()
-		if count == 0 {
-			continue // Not found in this frame, try next
-		}
-
-		// Determine the type of the element
-		tagNameVal, err := target.Evaluate("el => el.tagName.toLowerCase()", nil)
-		if err != nil {
-			continue
-		}
-		tagName := tagNameVal.(string)
-		roleVal, _ := target.GetAttribute("role")
-
-		// Strategy: Fill Text
-		if tagName == "input" || tagName == "textarea" {
-			// If it's a radio or checkbox input, handle it differently if needed,
-			// but for now try to fill or handle based on type
-			inputType, _ := target.GetAttribute("type")
-			if inputType == "radio" || inputType == "checkbox" {
-				// Broad visual fill radio fallback or direct click
-				target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
-				fmt.Printf("   ✅ [Proximity] Clicked input '%s' for answer '%s'\n", cleanLabel, answer)
-				return true
-			}
-
-			err := target.Fill(answer)
-			if err == nil {
-				fmt.Printf("   ✅ [Proximity] Filled text '%s' → '%s'\n", cleanLabel, answer)
-				return true
-			}
-		}
-
-		// Strategy: Native Select
-		if tagName == "select" {
-			_, err := target.SelectOption(playwright.SelectOptionValues{Labels: playwright.StringSlice(answer)})
-			if err == nil {
-				fmt.Printf("   ✅ [Proximity Select] '%s' → '%s'\n", cleanLabel, answer)
-				return true
-			}
-			// Try variants
-			for _, v := range variants {
-				_, err := target.SelectOption(playwright.SelectOptionValues{Labels: playwright.StringSlice(v)})
+		switch field.FieldType {
+		case "text":
+			xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[self::input or self::textarea][1]", cleanLabel)
+			target := frame.Locator(xpath).First()
+			if count, _ := target.Count(); count > 0 {
+				err := target.Fill(answer)
 				if err == nil {
-					fmt.Printf("   ✅ [Proximity Select Variant] '%s' → '%s'\n", cleanLabel, v)
+					fmt.Printf("   ✅ [Proximity Text] Filled '%s' → '%s'\n", cleanLabel, answer)
 					return true
 				}
 			}
-		}
 
-		// Strategy: Click-to-Reveal Fallback (Combobox / Listbox)
-		if roleVal == "combobox" || roleVal == "listbox" {
-			// a. Click to force dropdown open
-			err := target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
-			if err != nil {
-				continue
-			}
-
-			// b. Wait for React/Angular to render options
-			page.WaitForTimeout(500)
-
-			// c. Search page for exact text of answer
+		case "radio", "checkbox":
+			// Locate the specific radio/checkbox wrapper that contains the exact text of the AI's answer
 			for _, v := range variants {
-				// Search inside the frame
-				optionLoc := frame.GetByText(v, playwright.FrameGetByTextOptions{Exact: playwright.Bool(true)}).First()
-				if optCount, _ := optionLoc.Count(); optCount > 0 {
-					if vis, _ := optionLoc.IsVisible(); vis {
-						// d. Click that exact text option
-						if clickErr := optionLoc.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)}); clickErr == nil {
-							fmt.Printf("   ✅ [Click-to-Reveal] '%s' → '%s'\n", cleanLabel, v)
-							return true
-						}
+				// We look for a container (like label, div, span) near the original question label
+				// that specifically contains the variant text, and check the input inside it or itself.
+				// Since SuccessFactors can be tricky, a simpler approach is finding the text directly
+				// in the frame and checking it if it's a radio/checkbox wrapper.
+				optLocator := frame.GetByText(v, playwright.FrameGetByTextOptions{Exact: playwright.Bool(true)}).First()
+				if count, _ := optLocator.Count(); count > 0 {
+					err := optLocator.Check()
+					if err == nil {
+						fmt.Printf("   ✅ [%s] Checked option '%s' for '%s'\n", field.FieldType, v, cleanLabel)
+						return true
+					}
+					// If check fails, it might just need a click
+					err = optLocator.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+					if err == nil {
+						fmt.Printf("   ✅ [%s] Clicked option '%s' for '%s'\n", field.FieldType, v, cleanLabel)
+						return true
 					}
 				}
 			}
 
-			// e. Press Escape to close menu if not found
-			page.Keyboard().Press("Escape")
-			page.WaitForTimeout(300)
-		}
+		case "select":
+			xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::select[1]", cleanLabel)
+			target := frame.Locator(xpath).First()
+			if count, _ := target.Count(); count > 0 {
+				for _, v := range variants {
+					_, err := target.SelectOption(playwright.SelectOptionValues{Labels: playwright.StringSlice(v)})
+					if err == nil {
+						fmt.Printf("   ✅ [Proximity Select] '%s' → '%s'\n", cleanLabel, v)
+						return true
+					}
+				}
+			}
 
-		// Strategy: Role Radio
-		if roleVal == "radio" {
-			target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
-			fmt.Printf("   ✅ [Proximity] Clicked radio '%s'\n", cleanLabel)
-			return true
+		case "combobox":
+			xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[@role='combobox' or self::input][1]", cleanLabel)
+			target := frame.Locator(xpath).First()
+			if count, _ := target.Count(); count > 0 {
+				// 1) Click the combobox to open the menu
+				err := target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+				if err != nil {
+					continue
+				}
+
+				// 2) Wait for React/Angular to render options
+				page.WaitForTimeout(500)
+
+				// 3) Locate the exact answer text in the dropdown menu
+				found := false
+				for _, v := range variants {
+					optionLoc := frame.GetByText(v, playwright.FrameGetByTextOptions{Exact: playwright.Bool(true)}).First()
+					if optCount, _ := optionLoc.Count(); optCount > 0 {
+						if vis, _ := optionLoc.IsVisible(); vis {
+							// 4) Click it
+							if clickErr := optionLoc.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)}); clickErr == nil {
+								fmt.Printf("   ✅ [Click-to-Reveal] '%s' → '%s'\n", cleanLabel, v)
+								found = true
+								break
+							}
+						}
+					}
+				}
+
+				// 5) Press Escape to close the menu
+				page.Keyboard().Press("Escape")
+				page.WaitForTimeout(300)
+				if found {
+					return true
+				}
+			}
+
+		default:
+			// Fallback if FieldType is unknown or missing
+			xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[self::input or self::textarea or @role='combobox' or @role='radio' or @role='listbox' or self::select][1]", cleanLabel)
+			target := frame.Locator(xpath).First()
+			if count, _ := target.Count(); count > 0 {
+				target.Fill(answer)
+				return true
+			}
 		}
 	}
 
