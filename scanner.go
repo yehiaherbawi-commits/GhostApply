@@ -13,114 +13,54 @@ import (
 
 // scanFormFields uses a visual-first JavaScript scanner that finds ALL form
 // fields regardless of whether they use native HTML or custom ATS widgets.
+// It uses a Brute Force Label Strategy to find any text acting as a label.
 func scanFormFields(page playwright.Page) []formField {
 	jsScript := `() => {
 		const fields = [];
 		const seen = new Set();
 
-		// Collect ALL potential label/question elements
-		const allLabels = document.querySelectorAll(
-			'label, legend, ' +
-			'[class*="label" i]:not(input):not(button):not(select):not(textarea), ' +
-			'[id*="label" i]:not(input):not(button):not(select):not(textarea)'
-		);
+		// Brute Force Label Strategy: Scan for anything that looks like a label
+		const allNodes = document.querySelectorAll('*');
 
-		allLabels.forEach(el => {
-			if (!el.offsetParent) return;
+		allNodes.forEach(el => {
+			if (!el.offsetParent) return; // Must be visible
+
+			const isLabelTag = el.tagName.toLowerCase() === 'label';
+			const isAriaRequired = el.getAttribute('aria-required') === 'true';
+
+			// We only want leaf-ish nodes or specific tags, avoid getting massive body texts
+			if (!isLabelTag && !isAriaRequired && el.children.length > 2) return;
+
 			const text = el.innerText?.trim();
 			if (!text || text.length > 200 || text.length < 2) return;
-			if (seen.has(text)) return;
-			// Skip if element contains interactive children (it's a wrapper)
-			if (el.querySelector('input:not([type="hidden"]), select, textarea, [role="combobox"]')) return;
 
-			seen.add(text);
+			const hasAsterisk = text.includes('*');
 
-			// Walk up to the form group container
-			const container = el.closest(
-				'.form-group, .field-container, fieldset, ' +
-				'[class*="field" i], [class*="row" i], [class*="form" i], ' +
-				'div, li, section, td'
-			) || el.parentElement;
-			if (!container) return;
+			// If it's not a label tag, doesn't have an asterisk, and isn't aria-required, skip it
+			// unless it explicitly has a label class
+			const hasLabelClass = el.className && typeof el.className === 'string' && el.className.toLowerCase().includes('label');
+			if (!isLabelTag && !hasAsterisk && !isAriaRequired && !hasLabelClass) return;
 
-			let fieldType = 'unknown';
-			let options = [];
-			const isRequired = text.includes('*') ||
-				el.classList?.contains('required') ||
-				container.querySelector('[aria-required="true"]') !== null;
+			// Skip if it's a button or link
+			if (el.tagName.toLowerCase() === 'button' || el.tagName.toLowerCase() === 'a') return;
 
-			// Text input
-			const textInput = container.querySelector(
-				'input[type="text"], input[type="email"], input[type="tel"], ' +
-				'input[type="url"], input[type="number"], input:not([type])'
-			);
-			if (textInput && textInput.offsetParent && textInput.type !== 'hidden') {
-				fieldType = 'text';
-			}
+			const cleanLabel = text.replace(/\s*\*\s*$/, '').replace(/\s*\*/, ' ').trim();
+			if (seen.has(cleanLabel)) return;
+			seen.add(cleanLabel);
 
-			// Textarea
-			if (container.querySelector('textarea')?.offsetParent) {
-				fieldType = 'textarea';
-			}
+			// Determine field type by looking at the next sibling or children
+			// We just default to 'unknown' and let the Locator handle it,
+			// but we can make a rough guess
+			let fieldType = 'text'; // Default to text for brute force
 
-			// Native select
-			const sel = container.querySelector('select');
-			if (sel && sel.offsetParent) {
-				fieldType = 'dropdown';
-				options = Array.from(sel.options).map(o => o.text.trim()).filter(
-					t => t && t !== 'Please select' && t !== '--' && t !== '' && t !== 'Select...'
-				);
-			}
-
-			// Custom dropdown (role=combobox etc.)
-			const combo = container.querySelector(
-				'[role="combobox"], [role="listbox"], [aria-haspopup="listbox"], ' +
-				'[class*="dropdown" i]:not(label), [class*="combobox" i]'
-			);
-			if (combo && combo.offsetParent) {
-				fieldType = 'dropdown';
-			}
-
-			// Native radio buttons
-			const radios = container.querySelectorAll('input[type="radio"]');
-			if (radios.length > 0) {
-				fieldType = 'radio';
-				radios.forEach(r => {
-					let ol = '';
-					if (r.id) {
-						const lbl = document.querySelector('label[for="' + r.id + '"]');
-						if (lbl) ol = lbl.innerText.trim();
-					}
-					if (!ol) {
-						const p = r.closest('label');
-						if (p) ol = p.innerText.trim();
-					}
-					if (ol) options.push(ol);
-				});
-			}
-
-			// Custom radio/toggle
-			const cr = container.querySelectorAll(
-				'[role="radio"], [class*="toggle" i], [class*="choice" i]'
-			);
-			if (cr.length > 0 && fieldType !== 'radio') {
-				fieldType = 'radio';
-				cr.forEach(r => {
-					const t = r.innerText?.trim();
-					if (t && t.length < 50) options.push(t);
-				});
-			}
-
-			if (fieldType === 'unknown') return;
-
-			const cleanLabel = text.replace(/\\s*\\*\\s*$/, '').replace(/\\s*\\*/, ' ').trim();
+			// We can leave Options empty since we rely on click-to-reveal now
 
 			fields.push({
 				label: cleanLabel,
 				fieldType: fieldType,
 				tagName: fieldType,
-				required: isRequired,
-				options: [...new Set(options)],
+				required: hasAsterisk || isAriaRequired || el.classList?.contains('required'),
+				options: [],
 				selector: ''
 			});
 		});
@@ -128,15 +68,35 @@ func scanFormFields(page playwright.Page) []formField {
 		return fields;
 	}`
 
+	var fields []formField
+
+	// Check MainFrame first
 	result, err := page.Evaluate(jsScript, nil)
-	if err != nil {
-		fmt.Printf("   ⚠️  Visual field scan failed: %v\n", err)
-		return nil
+	if err == nil && result != nil {
+		jsonBytes, _ := json.Marshal(result)
+		json.Unmarshal(jsonBytes, &fields)
 	}
 
-	var fields []formField
-	jsonBytes, _ := json.Marshal(result)
-	json.Unmarshal(jsonBytes, &fields)
+	// IFRAME AWARENESS: SuccessFactors heavily utilizes iframes
+	if len(fields) == 0 {
+		fmt.Println("   ⚠️  0 fields found in MainFrame. Scanning ChildFrames (Iframe Fallback)...")
+		for _, frame := range page.MainFrame().ChildFrames() {
+			frameResult, err := frame.Evaluate(jsScript, nil)
+			if err == nil && frameResult != nil {
+				var frameFields []formField
+				jsonBytes, _ := json.Marshal(frameResult)
+				json.Unmarshal(jsonBytes, &frameFields)
+				if len(frameFields) > 0 {
+					fields = append(fields, frameFields...)
+					// We could break here if we assume only one main iframe, but let's collect all
+				}
+			}
+		}
+	}
+
+	if err != nil && len(fields) == 0 {
+		fmt.Printf("   ⚠️  Visual field scan failed: %v\n", err)
+	}
 
 	return fields
 }
