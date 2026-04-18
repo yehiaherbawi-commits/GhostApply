@@ -20,106 +20,100 @@ type formField struct {
 // VISUAL DOM SCANNER — Finds form fields by visible label text
 // ============================================================================
 
-// scanFormFields uses a visual-first JavaScript scanner that finds ALL form
-// fields regardless of whether they use native HTML or custom ATS widgets.
-// It uses a Brute Force Label Strategy to find any text acting as a label.
 func scanFormFields(page playwright.Page) []formField {
 	jsScript := `() => {
 		const fields = [];
 		const seen = new Set();
 
-		// Brute Force Label Strategy: Scan for anything that looks like a label
-		const allNodes = document.querySelectorAll('*');
+		// Container-First Strategy
+		const containerSelectors = [
+			'div[role="group"]',
+			'div.field-container',
+			'div.input-container',
+			'fieldset',
+			'.form-group',
+			'.field-wrapper',
+		];
 
-		allNodes.forEach(el => {
-			if (!el.offsetParent) return; // Must be visible
+		const allContainers = new Set();
 
-			const isLabelTag = el.tagName.toLowerCase() === 'label';
-			const isAriaRequired = el.getAttribute('aria-required') === 'true';
+		// Find defined containers
+		containerSelectors.forEach(sel => {
+			document.querySelectorAll(sel).forEach(el => allContainers.add(el));
+		});
 
-			// We only want leaf-ish nodes or specific tags, avoid getting massive body texts
-			if (!isLabelTag && !isAriaRequired && el.children.length > 2) return;
+		// Fallback: Find implicit containers (divs that have both a label and an input/select/textarea)
+		document.querySelectorAll('div, li').forEach(el => {
+			if (el.querySelector('label') && el.querySelector('input, select, textarea, [role="combobox"], [role="radio"]')) {
+				allContainers.add(el);
+			}
+		});
 
-			let text = el.innerText;
-			if (!text) return;
-			// 1. TEXT CLEANING: Replace all newlines with spaces and trim
-			text = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+		allContainers.forEach(container => {
+			if (!container.offsetParent) return; // Must be visible
 
-			// 2. LENGTH LIMIT: Ignore any text block longer than 60 characters
-			if (text.length > 60 || text.length < 2) return;
+			// Find label
+			let labelEl = container.querySelector('label');
+			let labelText = '';
+			let required = false;
 
-			// 3. EXCLUSION LIST: Explicitly ignore specific text
-			const lowerText = text.toLowerCase();
-			const exclusions = ['register', 'next', 'cancel', 'resume', 'please note'];
-			if (exclusions.some(ex => lowerText === ex)) return;
-
-			const hasAsterisk = text.includes('*');
-
-			// If it's not a label tag, doesn't have an asterisk, and isn't aria-required, skip it
-			// unless it explicitly has a label class
-			const hasLabelClass = el.className && typeof el.className === 'string' && el.className.toLowerCase().includes('label');
-			if (!isLabelTag && !hasAsterisk && !isAriaRequired && !hasLabelClass) return;
-
-			// Skip if it's a button or link
-			if (el.tagName.toLowerCase() === 'button' || el.tagName.toLowerCase() === 'a') return;
-
-			// 4. PROXIMITY VALIDATION: Verify input element exists
-			const parent = el.parentElement;
-			if (!parent) return;
-
-			const inputSelector = 'input, select, textarea, [role="combobox"]';
-			let hasInput = false;
-
-			// Check same parent container
-			if (parent.querySelector(inputSelector)) {
-				hasInput = true;
+			if (labelEl) {
+				labelText = labelEl.innerText;
 			} else {
-				// Check immediately following in DOM (nextElementSibling of el or its parent)
-				let next = el.nextElementSibling;
-				if (next && (next.matches(inputSelector) || next.querySelector(inputSelector))) {
-					hasInput = true;
+				// Try to find legend or span acting as label
+				const legendEl = container.querySelector('legend');
+				if (legendEl) {
+					labelText = legendEl.innerText;
 				} else {
-					next = parent.nextElementSibling;
-					if (next && (next.matches(inputSelector) || next.querySelector(inputSelector))) {
-						hasInput = true;
+					// Search for something resembling a label
+					const firstTextEl = container.querySelector('span, div');
+					if (firstTextEl) {
+						// Heuristics...
+						if (firstTextEl.innerText && firstTextEl.innerText.length < 100) {
+							labelText = firstTextEl.innerText;
+						}
 					}
 				}
 			}
 
-			if (!hasInput) return;
+			if (!labelText) return;
 
-			const cleanLabel = text.replace(/\s*\*\s*$/, '').replace(/\s*\*/, ' ').trim();
+			labelText = labelText.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+			if (labelText.includes('*')) {
+				required = true;
+			}
+
+			// Try checking if there's aria-required on any element within
+			const reqEl = container.querySelector('[aria-required="true"], .required');
+			if (reqEl) {
+				required = true;
+			}
+
+			const cleanLabel = labelText.replace(/\s*\*\s*$/, '').replace(/\s*\*/, ' ').trim();
+			if (!cleanLabel || cleanLabel.length > 100) return;
+
 			if (seen.has(cleanLabel)) return;
-			seen.add(cleanLabel);
 
-			// Determine field type by looking at the next sibling or children
+			// Identify Input Type
 			let fieldType = 'text';
-
-			// Try to find the actual input element to determine type
-			let inputEl = null;
-			if (parent.querySelector(inputSelector)) {
-				inputEl = parent.querySelector(inputSelector);
-			} else {
-				let next = el.nextElementSibling;
-				if (next) {
-					if (next.matches(inputSelector)) inputEl = next;
-					else inputEl = next.querySelector(inputSelector);
-				}
-				if (!inputEl) {
-					let pNext = parent.nextElementSibling;
-					if (pNext) {
-						if (pNext.matches(inputSelector)) inputEl = pNext;
-						else inputEl = pNext.querySelector(inputSelector);
-					}
-				}
-			}
+			const inputEl = container.querySelector('input, select, textarea, [role="combobox"], [role="radio"], [role="listbox"]');
+			let selector = '';
 
 			if (inputEl) {
+				// Try to compute a simple selector if it has an id or name
+				if (inputEl.id) {
+					selector = '#' + CSS.escape(inputEl.id);
+				} else if (inputEl.name) {
+					selector = '[name="' + CSS.escape(inputEl.name) + '"]';
+				}
+
 				const tag = inputEl.tagName.toLowerCase();
 				if (tag === 'select') {
 					fieldType = 'select';
-				} else if (inputEl.getAttribute('role') === 'combobox') {
+				} else if (inputEl.getAttribute('role') === 'combobox' || inputEl.getAttribute('role') === 'listbox') {
 					fieldType = 'combobox';
+				} else if (inputEl.getAttribute('role') === 'radio') {
+					fieldType = 'radio';
 				} else if (tag === 'input') {
 					const type = inputEl.getAttribute('type');
 					if (type === 'radio') {
@@ -132,17 +126,19 @@ func scanFormFields(page playwright.Page) []formField {
 				} else if (tag === 'textarea') {
 					fieldType = 'text';
 				}
+			} else {
+				return; // No input found in container
 			}
 
-			// We can leave Options empty since we rely on click-to-reveal now
+			seen.add(cleanLabel);
 
 			fields.push({
 				label: cleanLabel,
 				fieldType: fieldType,
 				tagName: fieldType,
-				required: hasAsterisk || isAriaRequired || el.classList?.contains('required'),
+				required: required,
 				options: [],
-				selector: ''
+				selector: selector
 			});
 		});
 
@@ -151,32 +147,22 @@ func scanFormFields(page playwright.Page) []formField {
 
 	var fields []formField
 
-	// Check MainFrame first
-	result, err := page.Evaluate(jsScript, nil)
-	if err == nil && result != nil {
-		jsonBytes, _ := json.Marshal(result)
-		json.Unmarshal(jsonBytes, &fields)
-	}
+	frames := append([]playwright.Frame{page.MainFrame()}, page.MainFrame().ChildFrames()...)
 
-	// IFRAME AWARENESS: SuccessFactors heavily utilizes iframes
-	if len(fields) == 0 {
-		fmt.Println("   ⚠️  0 fields found in MainFrame. Scanning ChildFrames (Iframe Fallback)...")
-		for _, frame := range page.MainFrame().ChildFrames() {
-			frameResult, err := frame.Evaluate(jsScript, nil)
-			if err == nil && frameResult != nil {
-				var frameFields []formField
-				jsonBytes, _ := json.Marshal(frameResult)
-				json.Unmarshal(jsonBytes, &frameFields)
-				if len(frameFields) > 0 {
-					fields = append(fields, frameFields...)
-					// We could break here if we assume only one main iframe, but let's collect all
-				}
+	for _, frame := range frames {
+		frameResult, err := frame.Evaluate(jsScript, nil)
+		if err == nil && frameResult != nil {
+			var frameFields []formField
+			jsonBytes, _ := json.Marshal(frameResult)
+			json.Unmarshal(jsonBytes, &frameFields)
+			if len(frameFields) > 0 {
+				fields = append(fields, frameFields...)
 			}
 		}
 	}
 
-	if err != nil && len(fields) == 0 {
-		fmt.Printf("   ⚠️  Visual field scan failed: %v\n", err)
+	if len(fields) == 0 {
+		fmt.Printf("   ⚠️  Visual field scan found 0 fields.\n")
 	}
 
 	return fields
