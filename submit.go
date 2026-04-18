@@ -426,61 +426,64 @@ func smartInject(page playwright.Page, field formField, answer string) bool {
 			}
 
 		case "radio", "checkbox":
-			// Locate the specific radio/checkbox wrapper that contains the exact text of the AI's answer
 			for _, v := range variants {
-				// We look for a container (like label, div, span) near the original question label
-				// that specifically contains the variant text, and check the input inside it or itself.
-				// Since SuccessFactors can be tricky, a simpler approach is finding the text directly
-				// in the frame and checking it if it's a radio/checkbox wrapper.
-				optLocator := frame.GetByText(v, playwright.FrameGetByTextOptions{Exact: playwright.Bool(true)}).First()
-				if count, _ := optLocator.Count(); count > 0 {
-					err := optLocator.Check()
+				// Locate radio/checkbox by looking for label text and matching associated input
+				labelLoc := frame.GetByText(v, playwright.FrameGetByTextOptions{Exact: playwright.Bool(true)}).First()
+				if count, _ := labelLoc.Count(); count > 0 {
+					// Check if the label itself is checkable (e.g. role=radio or wrapping input)
+					err := labelLoc.Check()
 					if err == nil {
 						fmt.Printf("   ✅ [%s] Checked option '%s' for '%s'\n", field.FieldType, v, cleanLabel)
 						return true
 					}
-					// If check fails, it might just need a click
-					err = optLocator.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+					// If not checkable directly, maybe we just need to click it (for custom wrappers)
+					err = labelLoc.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
 					if err == nil {
 						fmt.Printf("   ✅ [%s] Clicked option '%s' for '%s'\n", field.FieldType, v, cleanLabel)
 						return true
 					}
-				}
-			}
 
-		case "select":
-			xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::select[1]", cleanLabel)
-			target := frame.Locator(xpath).First()
-			if count, _ := target.Count(); count > 0 {
-				for _, v := range variants {
-					_, err := target.SelectOption(playwright.SelectOptionValues{Labels: playwright.StringSlice(v)})
-					if err == nil {
-						fmt.Printf("   ✅ [Proximity Select] '%s' → '%s'\n", cleanLabel, v)
+					// Or attempt to click the input that precedes or follows it
+					inputLoc := labelLoc.Locator("xpath=preceding-sibling::input | following-sibling::input | ../input").First()
+					if ic, _ := inputLoc.Count(); ic > 0 {
+						inputLoc.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+						fmt.Printf("   ✅ [%s] Clicked sibling input for '%s' for '%s'\n", field.FieldType, v, cleanLabel)
 						return true
 					}
 				}
 			}
 
-		case "combobox":
-			xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[@role='combobox' or self::input][1]", cleanLabel)
-			target := frame.Locator(xpath).First()
-			if count, _ := target.Count(); count > 0 {
-				// 1) Click the combobox to open the menu
-				err := target.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
+		case "select", "combobox":
+			// Try to find native select first
+			xpathSelect := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::select[1]", cleanLabel)
+			targetSelect := frame.Locator(xpathSelect).First()
+			if count, _ := targetSelect.Count(); count > 0 {
+				for _, v := range variants {
+					_, err := targetSelect.SelectOption(playwright.SelectOptionValues{Labels: playwright.StringSlice(v)})
+					if err == nil {
+						fmt.Printf("   ✅ [Proximity Select] '%s' → '%s'\n", cleanLabel, v)
+						return true
+					}
+					// Fallback to fuzzy match logic similar to safeSelect if necessary
+				}
+			}
+
+			// If no native select, treat as ARIA combobox / Click-to-Reveal
+			xpathCombo := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[@role='combobox' or @role='listbox' or self::input][1]", cleanLabel)
+			targetCombo := frame.Locator(xpathCombo).First()
+			if count, _ := targetCombo.Count(); count > 0 {
+				err := targetCombo.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)})
 				if err != nil {
 					continue
 				}
 
-				// 2) Wait for React/Angular to render options
 				page.WaitForTimeout(500)
 
-				// 3) Locate the exact answer text in the dropdown menu
 				found := false
 				for _, v := range variants {
 					optionLoc := frame.GetByText(v, playwright.FrameGetByTextOptions{Exact: playwright.Bool(true)}).First()
 					if optCount, _ := optionLoc.Count(); optCount > 0 {
 						if vis, _ := optionLoc.IsVisible(); vis {
-							// 4) Click it
 							if clickErr := optionLoc.Click(playwright.LocatorClickOptions{Timeout: playwright.Float(3000)}); clickErr == nil {
 								fmt.Printf("   ✅ [Click-to-Reveal] '%s' → '%s'\n", cleanLabel, v)
 								found = true
@@ -490,16 +493,15 @@ func smartInject(page playwright.Page, field formField, answer string) bool {
 					}
 				}
 
-				// 5) Press Escape to close the menu
-				page.Keyboard().Press("Escape")
-				page.WaitForTimeout(300)
 				if found {
 					return true
 				}
+				page.Keyboard().Press("Escape")
+				page.WaitForTimeout(300)
 			}
 
 		default:
-			// Fallback if FieldType is unknown or missing
+			// Fallback
 			xpath := fmt.Sprintf("xpath=//*[contains(text(), '%s')]/following::*[self::input or self::textarea or @role='combobox' or @role='radio' or @role='listbox' or self::select][1]", cleanLabel)
 			target := frame.Locator(xpath).First()
 			if count, _ := target.Count(); count > 0 {
@@ -513,11 +515,6 @@ func smartInject(page playwright.Page, field formField, answer string) bool {
 	return false
 }
 
-// ============================================================================
-// VISUAL FILL STRATEGIES — Work on native AND custom ATS widgets
-// ============================================================================
-
-// visualFillText fills a text input or textarea found by its visible label.
 func visualFillText(page playwright.Page, field formField, answer string) bool {
 	cleanLabel := strings.TrimSuffix(strings.TrimSpace(field.Label), "*")
 	cleanLabel = strings.TrimSpace(cleanLabel)
@@ -1146,6 +1143,21 @@ func AutoFillApplication(pw *playwright.Playwright, jobURL string, finalCV *CVCo
 		}
 
 		// ============================================================
+		// STRICT VALIDATION
+		// ============================================================
+		fmt.Println("\n🔎 [Validation] Checking for required field errors...")
+
+		errorLocs := page.Locator("text=error, text=required").First()
+		if count, _ := errorLocs.Count(); count > 0 {
+			if vis, _ := errorLocs.IsVisible(); vis {
+				text, _ := errorLocs.InnerText()
+				fmt.Printf("   🛑 Validation Error detected on page: %s\n", text)
+				fmt.Println("   🏁 Breaking pagination loop due to validation errors.")
+				break
+			}
+		}
+
+		// ============================================================
 		// NEXT BUTTON DETECTION — Navigate to next step or break
 		// ============================================================
 		fmt.Println("\n🔎 [Pagination] Looking for forward-progression button...")
@@ -1168,11 +1180,25 @@ func AutoFillApplication(pw *playwright.Playwright, jobURL string, finalCV *CVCo
 		dismissCookies(page)
 
 		// --- Stuck Page Detection ---
-		postClickURL := page.URL()
-		postClickTitle, _ := page.Title()
-		if postClickURL == preClickURL && postClickTitle == preClickTitle {
-			// Check if the page content actually changed by looking at visible headings
-			fmt.Println("   ⚠️  Page did not change after clicking 'Next'. Possibly stuck (validation errors?).")
+		// Wait up to 5 seconds for URL or DOM to change
+		pageChanged := false
+		for i := 0; i < 50; i++ {
+			time.Sleep(100 * time.Millisecond)
+			if page.URL() != preClickURL {
+				pageChanged = true
+				break
+			}
+
+			// Simple DOM change check (checking if title changes or new form renders)
+			currentTitle, _ := page.Title()
+			if currentTitle != preClickTitle {
+				pageChanged = true
+				break
+			}
+		}
+
+		if !pageChanged {
+			fmt.Println("   ⚠️  Page did not change after 5 seconds of clicking 'Next'. Possibly stuck (validation errors?).")
 			fmt.Println("   🏁 Breaking pagination loop. Please check the browser for errors.")
 			break
 		}
