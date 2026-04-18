@@ -31,8 +31,18 @@ func scanFormFields(page playwright.Page) []formField {
 			// We only want leaf-ish nodes or specific tags, avoid getting massive body texts
 			if (!isLabelTag && !isAriaRequired && el.children.length > 2) return;
 
-			const text = el.innerText?.trim();
-			if (!text || text.length > 200 || text.length < 2) return;
+			let text = el.innerText;
+			if (!text) return;
+			// 1. TEXT CLEANING: Replace all newlines with spaces and trim
+			text = text.replace(/\n/g, ' ').trim();
+
+			// 2. LENGTH LIMIT: Ignore any text block longer than 60 characters
+			if (text.length > 60 || text.length < 2) return;
+
+			// 3. EXCLUSION LIST: Explicitly ignore specific text
+			const lowerText = text.toLowerCase();
+			const exclusions = ['register', 'please note', 'resume', 'cancel', 'next'];
+			if (exclusions.some(ex => lowerText === ex || lowerText.startsWith(ex))) return;
 
 			const hasAsterisk = text.includes('*');
 
@@ -43,6 +53,31 @@ func scanFormFields(page playwright.Page) []formField {
 
 			// Skip if it's a button or link
 			if (el.tagName.toLowerCase() === 'button' || el.tagName.toLowerCase() === 'a') return;
+
+			// 4. PROXIMITY VALIDATION: Verify input element exists
+			const parent = el.parentElement;
+			if (!parent) return;
+
+			const inputSelector = 'input, select, textarea, [role="combobox"]';
+			let hasInput = false;
+
+			// Check same parent container
+			if (parent.querySelector(inputSelector)) {
+				hasInput = true;
+			} else {
+				// Check immediately following in DOM (nextElementSibling of el or its parent)
+				let next = el.nextElementSibling;
+				if (next && (next.matches(inputSelector) || next.querySelector(inputSelector))) {
+					hasInput = true;
+				} else {
+					next = parent.nextElementSibling;
+					if (next && (next.matches(inputSelector) || next.querySelector(inputSelector))) {
+						hasInput = true;
+					}
+				}
+			}
+
+			if (!hasInput) return;
 
 			const cleanLabel = text.replace(/\s*\*\s*$/, '').replace(/\s*\*/, ' ').trim();
 			if (seen.has(cleanLabel)) return;
