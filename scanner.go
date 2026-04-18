@@ -7,6 +7,15 @@ import (
 	"github.com/playwright-community/playwright-go"
 )
 
+type formField struct {
+	Label     string   `json:"label"`     // Human-readable question text
+	FieldType string   `json:"fieldType"` // "text", "select", "radio", "textarea", "checkbox", "combobox"
+	TagName   string   `json:"tagName"`   // kept for backward compat with Phase 3 UI
+	Required  bool     `json:"required"`  // Whether the field is required
+	Options   []string `json:"options"`   // Available options (for select/radio)
+	Selector  string   `json:"selector"`  // Optional CSS selector hint (may be empty)
+}
+
 // ============================================================================
 // VISUAL DOM SCANNER — Finds form fields by visible label text
 // ============================================================================
@@ -34,15 +43,15 @@ func scanFormFields(page playwright.Page) []formField {
 			let text = el.innerText;
 			if (!text) return;
 			// 1. TEXT CLEANING: Replace all newlines with spaces and trim
-			text = text.replace(/\n/g, ' ').trim();
+			text = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
 
 			// 2. LENGTH LIMIT: Ignore any text block longer than 60 characters
 			if (text.length > 60 || text.length < 2) return;
 
 			// 3. EXCLUSION LIST: Explicitly ignore specific text
 			const lowerText = text.toLowerCase();
-			const exclusions = ['register', 'please note', 'resume', 'cancel', 'next'];
-			if (exclusions.some(ex => lowerText === ex || lowerText.startsWith(ex))) return;
+			const exclusions = ['register', 'next', 'cancel', 'resume', 'please note'];
+			if (exclusions.some(ex => lowerText === ex)) return;
 
 			const hasAsterisk = text.includes('*');
 
@@ -84,9 +93,46 @@ func scanFormFields(page playwright.Page) []formField {
 			seen.add(cleanLabel);
 
 			// Determine field type by looking at the next sibling or children
-			// We just default to 'unknown' and let the Locator handle it,
-			// but we can make a rough guess
-			let fieldType = 'text'; // Default to text for brute force
+			let fieldType = 'text';
+
+			// Try to find the actual input element to determine type
+			let inputEl = null;
+			if (parent.querySelector(inputSelector)) {
+				inputEl = parent.querySelector(inputSelector);
+			} else {
+				let next = el.nextElementSibling;
+				if (next) {
+					if (next.matches(inputSelector)) inputEl = next;
+					else inputEl = next.querySelector(inputSelector);
+				}
+				if (!inputEl) {
+					let pNext = parent.nextElementSibling;
+					if (pNext) {
+						if (pNext.matches(inputSelector)) inputEl = pNext;
+						else inputEl = pNext.querySelector(inputSelector);
+					}
+				}
+			}
+
+			if (inputEl) {
+				const tag = inputEl.tagName.toLowerCase();
+				if (tag === 'select') {
+					fieldType = 'select';
+				} else if (inputEl.getAttribute('role') === 'combobox') {
+					fieldType = 'combobox';
+				} else if (tag === 'input') {
+					const type = inputEl.getAttribute('type');
+					if (type === 'radio') {
+						fieldType = 'radio';
+					} else if (type === 'checkbox') {
+						fieldType = 'checkbox';
+					} else {
+						fieldType = 'text';
+					}
+				} else if (tag === 'textarea') {
+					fieldType = 'text';
+				}
+			}
 
 			// We can leave Options empty since we rely on click-to-reveal now
 
