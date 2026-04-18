@@ -109,10 +109,17 @@ func EvaluateJob(jobText string, myCV string) (*Evaluation, error) {
 }
 
 // UPGRADED: Now accepts a feedback string from the Critic
+// For testing purposes, we can override the client options
+var genaiClientOptions []option.ClientOption
+
 func TailorCV(jobText string, myCV string, previousFeedback string) (*CVContent, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	ctx := context.Background()
-	client, _ := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+
+	opts := []option.ClientOption{option.WithAPIKey(apiKey)}
+	opts = append(opts, genaiClientOptions...)
+
+	client, _ := genai.NewClient(ctx, opts...)
 	defer client.Close()
 
 	model := client.GenerativeModel("gemini-2.5-pro")
