@@ -109,10 +109,17 @@ func EvaluateJob(jobText string, myCV string) (*Evaluation, error) {
 }
 
 // UPGRADED: Now accepts a feedback string from the Critic
+// For testing purposes, we can override the client options
+var genaiClientOptions []option.ClientOption
+
 func TailorCV(jobText string, myCV string, previousFeedback string) (*CVContent, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	ctx := context.Background()
-	client, _ := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	
+	opts := []option.ClientOption{option.WithAPIKey(apiKey)}
+	opts = append(opts, genaiClientOptions...)
+	
+	client, _ := genai.NewClient(ctx, opts...)
 	defer client.Close()
 
 	model := client.GenerativeModel("gemini-2.5-pro")
@@ -213,7 +220,9 @@ func DraftApplicationAnswers(browser playwright.Browser, jobText string, myCV st
 
 	// Turn 1: Send the prompt. The AI will reply with a request to run our tool.
 	resp, err := session.SendMessage(ctx, genai.Text(prompt))
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	// 3. The Interception: Check if the AI wants to use the tool
 	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
@@ -234,7 +243,9 @@ func DraftApplicationAnswers(browser playwright.Browser, jobText string, myCV st
 					Name:     "scrape_company_website",
 					Response: toolResult,
 				})
-				if err != nil { return nil, err }
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
