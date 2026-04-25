@@ -6,11 +6,12 @@
 
 ## ✨ Key Features
 
-### 🧠 AI-Powered Pipeline
+### 🧠 AI-Powered Pipeline & Career-Ops
 - **Intelligent Scraping**: Extracts job descriptions using 30+ cascading CSS selectors, recursive iframe search, and boilerplate cleanup.
-- **AI Evaluation**: Analyzes JD against your CV via Gemini and returns a compatibility score (1-10).
-- **AI Writer & Critic Loop**: Drafts a tailored CV, then a Critic agent reviews it. Up to 3 revision cycles with **best-draft tracking** (highest Critic score always wins).
-- **Application Strategist**: Drafts "Why this company?" and "Technical challenge" answers with interactive review before submission.
+- **Deep Evaluation Reports**: Analyzes JD against your CV via Gemini and generates a comprehensive Deep Report (Archetypes, Level Strategy, Comp Research, Personalization, Interview Prep).
+- **ATS-Optimized PDF Engine**: Uses an HTML template (Space Grotesk + DM Sans) rendered via Playwright, automatically injecting 15-20 JD keywords into your CV summary.
+- **Interview Story Bank**: Automatically extracts STAR+R stories from evaluations and appends them to a centralized `story-bank.md`.
+- **AI Writer & Critic Loop**: Drafts a tailored CV, then a Critic agent reviews it. Up to 3 revision cycles with **best-draft tracking**.
 - **Multi-CV Selection**: If a `cvs/` directory exists, Gemini AI picks the best-matching CV for each job automatically.
 
 ### 🤖 Automation & Form-Filling
@@ -34,8 +35,9 @@
 - **PII Anonymization**: `--anonymize-logs` command scrubs emails and phone numbers for safe log sharing.
 - **Dry-Run Mode**: `--dry-run` outputs a full JSON report without opening a browser or filling any forms.
 
-### 📊 Dashboard & Batch Processing
-- **Interactive TUI**: Bubble Tea dashboard for tracking application history, scores, and statuses.
+### 📊 Dashboard, Pipeline Integrity & Batch Processing
+- **Interactive TUI**: Bubble Tea dashboard for tracking application history. Press `Enter` to view inline Deep Evaluation markdown reports.
+- **Pipeline Tracker**: Automatically maintains a Markdown table (`data/applications.md`) synced with the SQLite database.
 - **Batch Processing**: Process multiple job URLs concurrently from `targets.txt` with per-worker budget checks.
 
 ---
@@ -90,6 +92,9 @@ GEMINI_API_KEY=your_api_key_here
 | `agent_profile.json` | Personal details and preferences for form-filling |
 | `targets.txt` | List of job URLs for batch mode |
 | `translations.json` | DE↔EN translation pairs (auto-loaded, 170 included) |
+| `templates/cv-template.html` | ATS-optimized HTML template used for PDF generation |
+| `data/applications.md` | Auto-updating markdown tracker of all processed jobs |
+| `story-bank.md` | Aggregated STAR+R interview prep stories from evaluations |
 
 ---
 
@@ -100,6 +105,12 @@ GEMINI_API_KEY=your_api_key_here
 go run . "https://company.com/job-listing-url"
 ```
 
+### Interactive Onboarding
+```bash
+go run . --onboard
+```
+Walks you through generating your `agent_profile.json` and base `my_cv.txt`.
+
 ### Dry-Run Mode (No Form Filling)
 ```bash
 go run . --dry-run "https://company.com/job-listing-url"
@@ -109,6 +120,12 @@ Outputs a JSON report (`dry_run_<Company>.json`) with tailored CV, draft answers
 ### Batch Mode
 ```bash
 go run . --batch
+```
+
+### Pipeline Integrity & Comparison
+```bash
+go run . --verify     # Checks if reports and DB are consistent
+go run . compare      # Ranks and compares highest-scoring offers
 ```
 
 ### Anonymize Audit Logs
@@ -155,10 +172,17 @@ GhostApply/
 ├── audit.go         # GDPR audit logger with PII anonymization
 ├── multicv.go       # AI-driven multi-CV selection
 ├── batch.go         # Concurrent batch processing with budget checks
-├── pdf.go           # PDF generation from tailored CVs
-├── ui.go            # Bubble Tea TUI dashboard
+├── eval.go          # Deep Evaluation generation and Playwright legitimacy checks
+├── pipeline.go      # Markdown tracker sync, verify, and offer comparison
+├── onboard.go       # Interactive CLI wizard for profile setup
+├── storybank.go     # STAR+R interview story aggregation
+├── pdf.go           # PDF generation from templates & ATS Keyword Injection
+├── ui.go            # Bubble Tea TUI dashboard with Markdown preview
 ├── db.go            # SQLite database operations
 ├── translations.json # 170 DE↔EN translation pairs
+├── templates/       # ATS-optimized HTML resume templates
+├── reports/         # Deep evaluation markdown reports (auto-generated)
+├── data/            # Tracking files (applications.md)
 ├── *_test.go        # Test suites (25 tests)
 ├── .gitignore       # Comprehensive exclusion rules
 └── .env             # API key (not committed)

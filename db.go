@@ -14,8 +14,9 @@ type Application struct {
 	Company string
 	Role    string
 	Score   float64
-	Status  string
-	URL     string
+	Status     string
+	URL        string
+	ReportPath string
 }
 
 func InitDB(filepath string) *sql.DB {
@@ -32,7 +33,8 @@ func InitDB(filepath string) *sql.DB {
 		role TEXT,
 		score REAL,
 		status TEXT,
-		url TEXT
+		url TEXT,
+		report_path TEXT
 	);
 	`
 
@@ -44,20 +46,31 @@ func InitDB(filepath string) *sql.DB {
 	return db
 }
 
-func SaveApplication(db *sql.DB, company string, role string, score float64, status string, jobURL string) error {
+func SaveApplication(db *sql.DB, company string, role string, score float64, status string, jobURL string, reportPath string) error {
 	insertQuery := `
-	INSERT INTO applications (date, company, role, score, status, url) 
-	VALUES (date('now'), ?, ?, ?, ?, ?);
+	INSERT INTO applications (date, company, role, score, status, url, report_path) 
+	VALUES (date('now'), ?, ?, ?, ?, ?, ?);
 	`
-	_, err := db.Exec(insertQuery, company, role, score, status, jobURL)
+	_, err := db.Exec(insertQuery, company, role, score, status, jobURL, reportPath)
 	if err != nil {
 		return fmt.Errorf("failed to insert application: %v", err)
 	}
+
+	app := Application{
+		Company:    company,
+		Role:       role,
+		Score:      score,
+		Status:     status,
+		URL:        jobURL,
+		ReportPath: reportPath,
+	}
+	UpdateMarkdownTracker(app)
+
 	return nil
 }
 
 func GetApplications(db *sql.DB) ([]Application, error) {
-	rows, err := db.Query("SELECT id, date, company, role, score, status, url FROM applications ORDER BY score DESC")
+	rows, err := db.Query("SELECT id, date, company, role, score, status, url, IFNULL(report_path, '') FROM applications ORDER BY score DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +79,7 @@ func GetApplications(db *sql.DB) ([]Application, error) {
 	var apps []Application
 	for rows.Next() {
 		var app Application
-		err := rows.Scan(&app.ID, &app.Date, &app.Company, &app.Role, &app.Score, &app.Status, &app.URL)
+		err := rows.Scan(&app.ID, &app.Date, &app.Company, &app.Role, &app.Score, &app.Status, &app.URL, &app.ReportPath)
 		if err != nil {
 			return nil, err
 		}

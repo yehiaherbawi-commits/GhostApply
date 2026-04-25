@@ -16,6 +16,7 @@ type JobResult struct {
 	URL        string
 	Eval       *Evaluation
 	TailoredCV *CVContent
+	ReportPath string
 	Error      error
 }
 
@@ -91,9 +92,28 @@ func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitG
 					finalCV = bestDraft // Use the BEST draft, not the last
 				}
 			}
+
+			// ATS Keyword Injection
+			if finalCV != nil {
+				fmt.Printf("   🎯 [Worker %d] Injecting ATS Keywords into CV summary and experience...\n", id)
+				injectedCV, err := InjectATSKeywords(text, finalCV)
+				if err == nil {
+					finalCV = injectedCV
+				}
+			}
+
+			// Deep Evaluation & Story Bank
+			fmt.Printf("   📊 [Worker %d] Performing Deep Evaluation...\n", id)
+			deepReport, reportPath, err := DeepEvaluateJob(browser, text, cv, url)
+			if err == nil && deepReport != nil {
+				fmt.Printf("   📚 [Worker %d] Appending stories to Story Bank...\n", id)
+				AppendStories(deepReport.InterviewPrep.Stories, eval.Company)
+				results <- JobResult{URL: url, Eval: eval, TailoredCV: finalCV, ReportPath: reportPath}
+				continue
+			}
 		}
 
-		results <- JobResult{URL: url, Eval: eval, TailoredCV: finalCV}
+		results <- JobResult{URL: url, Eval: eval, TailoredCV: finalCV, ReportPath: ""}
 	}
 }
 
@@ -131,7 +151,7 @@ func RunBatch(pw *playwright.Playwright, browser playwright.Browser, db *sql.DB,
 				continue
 			}
 
-			SaveApplication(db, res.Eval.Company, res.Eval.Role, res.Eval.Score, res.Eval.Status, res.URL)
+			SaveApplication(db, res.Eval.Company, res.Eval.Role, res.Eval.Score, res.Eval.Status, res.URL, res.ReportPath)
 			fmt.Printf("✅ [Logged] %s - %s (Score: %.1f)\n", res.Eval.Company, res.Eval.Role, res.Eval.Score)
 
 			// Generate the PDF using the pre-approved CV from the worker!

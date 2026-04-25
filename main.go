@@ -26,7 +26,7 @@ func containsArg(flag string) bool {
 // getTargetURL returns the first non-flag argument (the job URL)
 func getTargetURL() string {
 	for _, arg := range os.Args[1:] {
-		if arg != "--batch" && arg != "--dry-run" && arg != "--anonymize-logs" {
+		if arg != "--batch" && arg != "--dry-run" && arg != "--anonymize-logs" && arg != "--onboard" && arg != "--verify" && arg != "compare" {
 			return arg
 		}
 	}
@@ -48,6 +48,18 @@ func main() {
 		if err := AnonymizeLogs("audit.log", "audit_anonymized.log"); err != nil {
 			log.Fatalf("Anonymization failed: %v", err)
 		}
+		return
+	}
+	if containsArg("--onboard") {
+		RunOnboarding()
+		return
+	}
+	if containsArg("--verify") {
+		VerifyPipeline(db)
+		return
+	}
+	if containsArg("compare") {
+		CompareOffers(db)
 		return
 	}
 
@@ -102,6 +114,7 @@ func main() {
 
 			fmt.Printf("✅ Identified: %s - %s (Score: %.1f)\n", evaluation.Company, evaluation.Role, evaluation.Score)
 
+			var reportPath string
 			if evaluation.Score >= 4.0 {
 				fmt.Println("✨ High Score! Generating tailored materials...")
 
@@ -142,15 +155,32 @@ func main() {
 
 					if review != nil && review.Approved {
 						fmt.Printf("   ✨ Critic APPROVED final draft for %s!\n", evaluation.Company)
-						GeneratePDF(pw, draft, pdfName)
 						finalCV = draft
 					} else {
 						fmt.Printf("   ⚠️  Critic did not fully approve %s. Using best-scored draft (score: %d).\n", evaluation.Company, bestScore)
 						if bestDraft != nil {
-							GeneratePDF(pw, bestDraft, pdfName)
 							finalCV = bestDraft
 						}
 					}
+				}
+
+				// ATS Keyword Injection
+				if finalCV != nil {
+					fmt.Println("   🎯 [ATS Injector] Optimizing CV with keywords from Job Description...")
+					injectedCV, err := InjectATSKeywords(scrapedText, finalCV)
+					if err == nil {
+						finalCV = injectedCV
+					}
+					GeneratePDF(pw, finalCV, pdfName)
+				}
+
+				// Deep Evaluation & Story Bank
+				fmt.Println("   📊 [AI Deep Eval] Performing Deep Evaluation...")
+				deepReport, rPath, err := DeepEvaluateJob(browser, scrapedText, selectedCV, targetURL)
+				if err == nil && deepReport != nil {
+					reportPath = rPath
+					fmt.Println("   📚 [Story Bank] Appending stories to Story Bank...")
+					AppendStories(deepReport.InterviewPrep.Stories, evaluation.Company)
 				}
 
 				fmt.Println("   💡 [AI Strategist] Drafting application answers...")
@@ -206,7 +236,7 @@ func main() {
 				}
 			}
 
-			SaveApplication(db, evaluation.Company, evaluation.Role, evaluation.Score, evaluation.Status, targetURL)
+			SaveApplication(db, evaluation.Company, evaluation.Role, evaluation.Score, evaluation.Status, targetURL, reportPath)
 
 			fmt.Printf("\n📊 Token Usage: ~%d / %d estimated tokens\n", GlobalBudget.EstimatedUsed, GlobalBudget.MaxTokens)
 			fmt.Println("\nPress Enter to open Dashboard...")
