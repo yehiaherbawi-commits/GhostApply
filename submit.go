@@ -12,35 +12,37 @@ import (
 )
 
 // ============================================================================
-// QA MEMORY BANK — Self-Learning Answer Cache
+// QA MEMORY BANK — Self-Learning Answer Cache (Encrypted)
 // ============================================================================
 
-const qaMemoryFile = "qa_memory.json"
+const (
+	qaMemoryPlainFile = "qa_memory.json" // Legacy plaintext (auto-migrated)
+	qaMemoryEncFile   = "qa_memory.enc"  // Encrypted memory bank
+)
 
-// loadQAMemory reads the memory bank from disk. Creates it if missing.
+// loadQAMemory reads the encrypted memory bank from disk. Creates it if missing.
 func loadQAMemory() map[string]string {
 	memory := make(map[string]string)
 
-	data, err := os.ReadFile(qaMemoryFile)
+	found, err := ReadEncryptedJSON(encryptionKey, qaMemoryEncFile, &memory)
 	if err != nil {
-		saveQAMemory(memory)
-		fmt.Println("   📝 Created new qa_memory.json (empty)")
-		return memory
-	}
-
-	if err := json.Unmarshal(data, &memory); err != nil {
-		fmt.Printf("   ⚠️  qa_memory.json is corrupted, starting fresh: %v\n", err)
+		fmt.Printf("   ⚠️  QA Memory error: %v — starting fresh\n", err)
 		memory = make(map[string]string)
 		saveQAMemory(memory)
+	}
+	if !found {
+		saveQAMemory(memory)
+		fmt.Println("   📝 Created new encrypted qa_memory.enc (empty)")
 	}
 
 	return memory
 }
 
-// saveQAMemory persists the memory bank to disk immediately
+// saveQAMemory encrypts and persists the memory bank to disk immediately.
 func saveQAMemory(memory map[string]string) {
-	data, _ := json.MarshalIndent(memory, "", "  ")
-	os.WriteFile(qaMemoryFile, data, 0644)
+	if err := WriteEncryptedJSON(encryptionKey, qaMemoryEncFile, memory); err != nil {
+		fmt.Printf("   ⚠️  Failed to save QA memory: %v\n", err)
+	}
 }
 
 // findInMemory checks if a question (label text) has a matching answer in memory.
@@ -795,35 +797,224 @@ func fuzzySelectOption(loc playwright.Locator, answer string) bool {
 	return false
 }
 
+// ============================================================================
+// DATE PICKER HANDLER — Support for Native & Custom Date Widgets
+// ============================================================================
+
+// handleDateFields finds date input fields and fills them using JavaScript.
+// Supports input[type="date"] and common date picker libraries.
+func handleDateFields(page playwright.Page, profileData map[string]string) {
+	// Check for native date inputs
+	dateInputs := page.Locator("input[type='date']")
+	count, _ := dateInputs.Count()
+
+	for i := 0; i < count; i++ {
+		input := dateInputs.Nth(i)
+		label := getInputLabel(page, input)
+
+		// Try to find a matching date in profile data
+		dateValue := findDateInProfile(profileData, label)
+		if dateValue == "" {
+			continue
+		}
+
+		// Use JavaScript to set value (bypasses validation)
+		input.Evaluate("(el, val) => { el.value = val; el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true})); }", dateValue)
+		fmt.Printf("   📅 Set date field [%s] → %s\n", label, dateValue)
+	}
+
+	// Check for custom date pickers (class contains "datepicker" or "date-picker")
+	customDateSelectors := []string{
+		"input[class*='datepicker' i]",
+		"input[class*='date-picker' i]",
+		"input[data-date]",
+		"input[data-provide='datepicker']",
+	}
+
+	for _, sel := range customDateSelectors {
+		loc := page.Locator(sel)
+		c, _ := loc.Count()
+		for i := 0; i < c; i++ {
+			input := loc.Nth(i)
+			label := getInputLabel(page, input)
+			dateValue := findDateInProfile(profileData, label)
+			if dateValue != "" {
+				input.Fill(dateValue)
+				humanDelay(200, 400)
+				page.Keyboard().Press("Escape") // Close any popup calendar
+				fmt.Printf("   📅 Set custom date [%s] → %s\n", label, dateValue)
+			}
+		}
+	}
+}
+
+// getInputLabel attempts to extract the label text for an input element.
+func getInputLabel(page playwright.Page, input playwright.Locator) string {
+	// Try aria-label
+	ariaLabel, _ := input.GetAttribute("aria-label")
+	if ariaLabel != "" {
+		return ariaLabel
+	}
+
+	// Try name or id
+	name, _ := input.GetAttribute("name")
+	if name != "" {
+		return name
+	}
+
+	id, _ := input.GetAttribute("id")
+	if id != "" {
+		return id
+	}
+
+	return "unknown"
+}
+
+// findDateInProfile looks for a date-like value in the profile data.
+func findDateInProfile(profileData map[string]string, label string) string {
+	labelLower := strings.ToLower(label)
+	dateKeys := []string{
+		"date_of_birth", "dob", "birthday", "geburtsdatum",
+		"start_date", "startdatum", "available_from", "verfügbar_ab",
+	}
+
+	for _, key := range dateKeys {
+		if strings.Contains(labelLower, key) || strings.Contains(key, labelLower) {
+			if val, ok := profileData[key]; ok {
+				return val
+			}
+		}
+	}
+
+	// Also check profile data keys that contain "date"
+	for k, v := range profileData {
+		if strings.Contains(strings.ToLower(k), "date") {
+			if strings.Contains(labelLower, strings.ToLower(k)) {
+				return v
+			}
+		}
+	}
+
+	return ""
+}
+
+// ============================================================================
+// TAG INPUT HANDLER — Multi-Select & Tag Libraries
+// ============================================================================
+
+// handleTagInput handles tag-style inputs like select2, tagify, or chip inputs.
+// It types each value and presses Enter/Comma to add it as a tag.
+func handleTagInput(page playwright.Page, selector string, values []string) bool {
+	// Strategy 1: select2 containers
+	select2 := page.Locator(selector + " ~ .select2-container, " + selector + ".select2-hidden-accessible")
+	if c, _ := select2.Count(); c > 0 {
+		// Click to open the select2 dropdown
+		select2.First().Click()
+		humanDelay(300, 500)
+		for _, val := range values {
+			searchInput := page.Locator(".select2-search__field").First()
+			if count, _ := searchInput.Count(); count > 0 {
+				searchInput.Fill(val)
+				humanDelay(300, 500)
+				page.Keyboard().Press("Enter")
+				humanDelay(200, 400)
+			}
+		}
+		page.Keyboard().Press("Escape")
+		return true
+	}
+
+	// Strategy 2: tagify containers
+	tagify := page.Locator(selector + " ~ .tagify, tags.tagify")
+	if c, _ := tagify.Count(); c > 0 {
+		tagifyInput := tagify.First().Locator("input, .tagify__input").First()
+		if count, _ := tagifyInput.Count(); count > 0 {
+			for _, val := range values {
+				tagifyInput.Fill(val)
+				humanDelay(100, 200)
+				page.Keyboard().Press("Enter")
+				humanDelay(200, 400)
+			}
+		}
+		return true
+	}
+
+	// Strategy 3: Generic chip/tag input — type + Enter for each value
+	loc := page.Locator(selector).First()
+	if count, _ := loc.Count(); count > 0 {
+		loc.Click()
+		humanDelay(200, 400)
+		for _, val := range values {
+			loc.Fill(val)
+			humanDelay(100, 200)
+			page.Keyboard().Press("Enter")
+			humanDelay(200, 400)
+		}
+		return true
+	}
+
+	return false
+}
+
+// translationsCache is loaded once from translations.json at first use.
+var translationsCache map[string]string
+var translationsLoaded bool
+
+// loadTranslations reads translations.json and flattens all categories into
+// a single lowercase key → value map. Called lazily on first use.
+func loadTranslations() map[string]string {
+	if translationsLoaded {
+		return translationsCache
+	}
+	translationsLoaded = true
+	translationsCache = make(map[string]string)
+
+	data, err := os.ReadFile("translations.json")
+	if err != nil {
+		fmt.Println("   ⚠️  translations.json not found — using built-in translations.")
+		return translationsCache
+	}
+
+	var categories map[string]map[string]string
+	if err := json.Unmarshal(data, &categories); err != nil {
+		fmt.Printf("   ⚠️  translations.json parse error: %v\n", err)
+		return translationsCache
+	}
+
+	for _, pairs := range categories {
+		for k, v := range pairs {
+			translationsCache[strings.ToLower(k)] = v
+		}
+	}
+
+	fmt.Printf("   🌍 Loaded %d translation pairs from translations.json\n", len(translationsCache))
+	return translationsCache
+}
+
 // getAnswerVariants returns the original answer plus DE↔EN translations.
+// It loads from translations.json (all categories), with hardcoded fallbacks.
 func getAnswerVariants(answer string) []string {
 	variants := []string{answer}
-	translations := map[string]string{
-		"deutschland": "Germany", "germany": "Deutschland",
-		"jordanien": "Jordan", "jordan": "Jordanien",
-		"österreich": "Austria", "austria": "Österreich",
-		"schweiz": "Switzerland", "switzerland": "Schweiz",
-		"frankreich": "France", "france": "Frankreich",
-		"niederlande": "Netherlands", "netherlands": "Niederlande",
-		"vereinigtes königreich": "United Kingdom", "united kingdom": "Vereinigtes Königreich",
-		"vereinigte staaten": "United States", "united states": "Vereinigte Staaten",
-		"spanien": "Spain", "spain": "Spanien",
-		"italien": "Italy", "italy": "Italien",
-		"polen": "Poland", "poland": "Polen",
-		"türkei": "Turkey", "turkey": "Türkei",
-		"schweden": "Sweden", "sweden": "Schweden",
-		"norwegen": "Norway", "norway": "Norwegen",
-		"dänemark": "Denmark", "denmark": "Dänemark",
-		"belgien": "Belgium", "belgium": "Belgien",
-		"indien": "India", "india": "Indien",
-		"kanada": "Canada", "canada": "Kanada",
-		"australien": "Australia", "australia": "Australien",
+
+	// Try external translations first
+	externalTranslations := loadTranslations()
+	answerLower := strings.ToLower(answer)
+
+	if translated, ok := externalTranslations[answerLower]; ok {
+		variants = append(variants, translated)
+		return variants
+	}
+
+	// Hardcoded fallback for the most critical translations
+	fallback := map[string]string{
 		"ja": "Yes", "yes": "Ja",
 		"nein": "No", "no": "Nein",
+		"deutschland": "Germany", "germany": "Deutschland",
 	}
-	if translated, ok := translations[strings.ToLower(answer)]; ok {
+	if translated, ok := fallback[answerLower]; ok {
 		variants = append(variants, translated)
 	}
+
 	return variants
 }
 
@@ -847,18 +1038,24 @@ func AutoFillApplication(pw *playwright.Playwright, jobURL string, finalCV *CVCo
 		fmt.Printf("   📋 Loaded Agent Profile (%d fields)\n", len(profileData))
 	}
 
-	// ----- Launch Visible Browser -----
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(false),
-	})
-	if err != nil {
-		return fmt.Errorf("could not launch browser: %v", err)
+	// ----- Audit Logger (GDPR Compliance) -----
+	auditLogger, auditErr := NewAuditLogger("audit.log")
+	if auditErr != nil {
+		fmt.Printf("   ⚠️  Audit logger unavailable: %v\n", auditErr)
+	} else {
+		defer auditLogger.Close()
 	}
 
-	page, err := browser.NewPage()
+	// Track all fields filled for audit logging
+	fieldsFilled := make(map[string]string)
+	fieldSources := make(map[string]string)
+
+	// ----- Launch Visible Stealth Browser -----
+	browser, page, err := launchStealthBrowser(pw, false)
 	if err != nil {
-		return fmt.Errorf("could not create page: %v", err)
+		return fmt.Errorf("could not launch stealth browser: %v", err)
 	}
+	_ = browser // Browser stays open for manual review; user closes it
 
 	// ----- Navigate -----
 	fmt.Printf("🌐 [Auto-Submitter] Navigating to %s\n", jobURL)
@@ -1056,22 +1253,71 @@ func AutoFillApplication(pw *playwright.Playwright, jobURL string, finalCV *CVCo
 			profileJSON, _ := json.Marshal(profileData)
 			actionPlan, aiErr := AIFinishApplication(formHTML, string(profileJSON))
 			if aiErr == nil && actionPlan != nil {
+				var unknownRequired []AIAction // Collect unknown fields for batch prompting
+
 				for _, action := range actionPlan.Actions {
 					switch action.Type {
 					case "unknown_required":
-						fmt.Printf("   ⚠️  Unknown Required Field: [%s] — Skipping rather than crashing.\n", action.Label)
+						// Collect instead of skipping silently
+						unknownRequired = append(unknownRequired, action)
+
 					case "fill":
-						if safeFill(page, action.Selector, action.Value) {
-							fmt.Printf("   ✅ AI filled [%s]\n", action.Label)
+						// SELECTOR VALIDATION: Check if AI's selector actually exists
+						if count, _ := page.Locator(action.Selector).Count(); count > 0 {
+							if safeFill(page, action.Selector, action.Value) {
+								fmt.Printf("   ✅ AI filled [%s]\n", action.Label)
+							}
+						} else {
+							fmt.Printf("   ⚠️  [Selector Invalid] AI selector '%s' not found. Falling back to visual fill for '%s'\n", action.Selector, action.Label)
+							// Fallback to visual-first scanner
+							fallbackField := formField{Label: action.Label, FieldType: "text"}
+							smartInject(page, fallbackField, action.Value)
 						}
+
 					case "select":
-						if safeSelect(page, action.Selector, action.Value) {
-							fmt.Printf("   ✅ AI selected [%s] → %s\n", action.Label, action.Value)
+						if count, _ := page.Locator(action.Selector).Count(); count > 0 {
+							if safeSelect(page, action.Selector, action.Value) {
+								fmt.Printf("   ✅ AI selected [%s] → %s\n", action.Label, action.Value)
+							}
+						} else {
+							fmt.Printf("   ⚠️  [Selector Invalid] Falling back to visual fill for '%s'\n", action.Label)
+							fallbackField := formField{Label: action.Label, FieldType: "select"}
+							smartInject(page, fallbackField, action.Value)
 						}
+
 					case "click":
-						if safeClick(page, action.Selector) {
-							time.Sleep(1 * time.Second)
-							fmt.Printf("   ✅ AI clicked [%s]\n", action.Label)
+						if count, _ := page.Locator(action.Selector).Count(); count > 0 {
+							if safeClick(page, action.Selector) {
+								humanDelay(800, 1200)
+								fmt.Printf("   ✅ AI clicked [%s]\n", action.Label)
+							}
+						} else {
+							fmt.Printf("   ⚠️  [Selector Invalid] Click target '%s' not found for '%s'\n", action.Selector, action.Label)
+						}
+					}
+				}
+
+				// --- UNKNOWN REQUIRED FIELDS: Batch prompt ---
+				if len(unknownRequired) > 0 {
+					fmt.Printf("\n   ┌─────────────────────────────────────────────────\n")
+					fmt.Printf("   │ 🆕 %d UNKNOWN REQUIRED FIELDS detected:\n", len(unknownRequired))
+					fmt.Printf("   │\n")
+					for i, uf := range unknownRequired {
+						fmt.Printf("   │ %d. %s\n", i+1, uf.Label)
+					}
+					fmt.Printf("   │\n")
+					fmt.Printf("   │ Please provide answers below:\n")
+					fmt.Printf("   └─────────────────────────────────────────────────\n")
+
+					for _, uf := range unknownRequired {
+						answer := askHuman(uf.Label)
+						if answer != "" {
+							field := formField{Label: uf.Label, FieldType: "text", Required: true}
+							smartInject(page, field, answer)
+							// Save to QA memory for future use
+							qaMemory[strings.ToLower(strings.TrimSpace(uf.Label))] = answer
+							saveQAMemory(qaMemory)
+							newQuestionsLearned++
 						}
 					}
 				}
@@ -1080,11 +1326,14 @@ func AutoFillApplication(pw *playwright.Playwright, jobURL string, finalCV *CVCo
 			}
 		}
 
+		// ---- Date Picker Handler ----
+		handleDateFields(page, profileData)
+
 		// ============================================================
 		// PHASE 3 — Self-Learning QA Memory Bank
 		// ============================================================
 		fmt.Println("\n🔍 [Phase 3] Scanning ALL remaining form fields...")
-		time.Sleep(1 * time.Second)
+		humanDelay(800, 1200)
 
 		fields := scanFormFields(page)
 		fmt.Printf("   📋 Found %d scannable fields on this step\n", len(fields))
@@ -1219,6 +1468,42 @@ func AutoFillApplication(pw *playwright.Playwright, jobURL string, finalCV *CVCo
 	fmt.Println("   👀 Review the form in the browser and submit manually.")
 	fmt.Println("   (Close the browser window when you are done)")
 	fmt.Println("══════════════════════════════════════════════════════")
+
+	// ----- GDPR Audit Log -----
+	// Log CV fields as tracked data
+	if finalCV != nil {
+		fieldsFilled["Name"] = finalCV.Name
+		fieldSources["Name"] = "cv"
+		fieldsFilled["Email"] = finalCV.Email
+		fieldSources["Email"] = "cv"
+		fieldsFilled["Phone"] = finalCV.Phone
+		fieldSources["Phone"] = "cv"
+		fieldsFilled["Location"] = finalCV.Location
+		fieldSources["Location"] = "cv"
+	}
+	// Log profile fields
+	for k, v := range profileData {
+		if _, alreadyLogged := fieldsFilled[k]; !alreadyLogged {
+			fieldsFilled[k] = v
+			fieldSources[k] = "profile"
+		}
+	}
+	// Log QA memory answers used
+	for k, v := range qaMemory {
+		if _, alreadyLogged := fieldsFilled[k]; !alreadyLogged {
+			fieldsFilled[k] = v
+			fieldSources[k] = "memory"
+		}
+	}
+
+	if auditLogger != nil {
+		auditLogger.Log(AuditEntry{
+			JobURL:  jobURL,
+			Fields:  fieldsFilled,
+			Sources: fieldSources,
+		})
+		fmt.Println("   📝 Audit log entry written to audit.log")
+	}
 
 	return nil
 }

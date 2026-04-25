@@ -2,52 +2,77 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/playwright-community/playwright-go"
 	"golang.org/x/term"
 )
 
 // ============================================================================
-// CREDENTIAL VAULT — Persistent Login Credential Store
+// CREDENTIAL VAULT — Encrypted Login Credential Store (AES-256-GCM)
 // ============================================================================
 
-const credentialsFile = "credentials.json"
+const (
+	credentialsPlainFile = "credentials.json" // Legacy plaintext (auto-migrated)
+	credentialsEncFile   = "credentials.enc"  // Encrypted vault
+	encryptionKeyFile    = ".jobagent.key"     // Local encryption key
+)
+
+// encryptionKey holds the AES-256 key loaded at startup.
+// It is set by InitEncryption() called from main().
+var encryptionKey []byte
+
+// InitEncryption loads (or creates) the encryption key and auto-migrates
+// any plaintext secret files to their encrypted equivalents.
+func InitEncryption() error {
+	key, err := LoadOrCreateKey(encryptionKeyFile)
+	if err != nil {
+		return fmt.Errorf("failed to load encryption key: %v", err)
+	}
+	encryptionKey = key
+
+	// Auto-migrate plaintext files → encrypted
+	if err := MigrateToEncrypted(key, credentialsPlainFile, credentialsEncFile); err != nil {
+		fmt.Printf("   ⚠️  Credential migration warning: %v\n", err)
+	}
+	if err := MigrateToEncrypted(key, qaMemoryPlainFile, qaMemoryEncFile); err != nil {
+		fmt.Printf("   ⚠️  QA Memory migration warning: %v\n", err)
+	}
+
+	return nil
+}
 
 type domainCredentials struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
-// loadCredentials reads the credential vault from disk. Creates it if missing.
+// loadCredentials reads the encrypted credential vault from disk. Creates it if missing.
 func loadCredentials() map[string]domainCredentials {
 	creds := make(map[string]domainCredentials)
 
-	data, err := os.ReadFile(credentialsFile)
+	found, err := ReadEncryptedJSON(encryptionKey, credentialsEncFile, &creds)
 	if err != nil {
-		saveCredentials(creds)
-		return creds
-	}
-
-	if err := json.Unmarshal(data, &creds); err != nil {
-		fmt.Printf("   ⚠️  credentials.json is corrupted, starting fresh: %v\n", err)
+		fmt.Printf("   ⚠️  Credential vault error: %v — starting fresh\n", err)
 		creds = make(map[string]domainCredentials)
+		saveCredentials(creds)
+	}
+	if !found {
 		saveCredentials(creds)
 	}
 
 	return creds
 }
 
-// saveCredentials persists credentials to disk immediately
+// saveCredentials encrypts and persists credentials to disk immediately.
 func saveCredentials(creds map[string]domainCredentials) {
-	data, _ := json.MarshalIndent(creds, "", "  ")
-	os.WriteFile(credentialsFile, data, 0600) // Restrictive file permissions
+	if err := WriteEncryptedJSON(encryptionKey, credentialsEncFile, creds); err != nil {
+		fmt.Printf("   ⚠️  Failed to save credentials: %v\n", err)
+	}
 }
 
 // extractBaseDomain returns the base domain from a URL (e.g., "myworkdayjobs.com")
@@ -126,6 +151,146 @@ func detectAuthWall(page playwright.Page) bool {
 	return false
 }
 
+// ============================================================================
+// CAPTCHA DETECTION & MANUAL SOLVE
+// ============================================================================
+
+// detectCaptcha checks for common CAPTCHA patterns on the page
+func detectCaptcha(page playwright.Page) bool {
+	captchaSelectors := []string{
+		// reCAPTCHA
+		"iframe[src*='recaptcha']",
+		"iframe[src*='google.com/recaptcha']",
+		".g-recaptcha",
+		"[data-sitekey]",
+		// hCaptcha
+		"iframe[src*='hcaptcha']",
+		".h-captcha",
+		// Generic CAPTCHA
+		"iframe[src*='captcha']",
+		"#captcha",
+		"[class*='captcha' i]",
+		"img[alt*='captcha' i]",
+	}
+
+	for _, sel := range captchaSelectors {
+		loc := page.Locator(sel)
+		if count, _ := loc.Count(); count > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// waitForCaptchaSolution pauses execution and instructs the user to solve
+// the CAPTCHA manually in the visible browser window.
+// timeoutSeconds: max wait time before aborting (default 120s).
+func waitForCaptchaSolution(page playwright.Page, timeoutSeconds int) error {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 120
+	}
+
+	fmt.Println("\n   ┌─────────────────────────────────────────────────")
+	fmt.Println("   │ 🤖 CAPTCHA DETECTED!")
+	fmt.Println("   │ Please solve the CAPTCHA in the browser window.")
+	fmt.Printf("   │ ⏰ Timeout: %d seconds\n", timeoutSeconds)
+	fmt.Println("   └─────────────────────────────────────────────────")
+
+	elapsed := 0
+	for elapsed < timeoutSeconds {
+		humanDelay(2000, 3000) // Poll every 2-3 seconds
+		elapsed += 3
+
+		if !detectCaptcha(page) {
+			fmt.Println("   ✅ CAPTCHA solved! Continuing...")
+			return nil
+		}
+
+		if elapsed%15 == 0 {
+			fmt.Printf("   ⏳ Still waiting for CAPTCHA solution... (%ds/%ds)\n", elapsed, timeoutSeconds)
+		}
+	}
+
+	return fmt.Errorf("CAPTCHA solve timeout after %d seconds", timeoutSeconds)
+}
+
+// ============================================================================
+// MFA (Multi-Factor Authentication) DETECTION
+// ============================================================================
+
+// detectMFA checks if the current page is showing an MFA/2FA prompt
+func detectMFA(page playwright.Page) bool {
+	mfaSelectors := []string{
+		// OTP/code input fields
+		"input[name*='otp' i]",
+		"input[name*='code' i]",
+		"input[name*='token' i]",
+		"input[name*='mfa' i]",
+		"input[name*='verification' i]",
+		"input[autocomplete='one-time-code']",
+	}
+
+	for _, sel := range mfaSelectors {
+		loc := page.Locator(sel)
+		if count, _ := loc.Count(); count > 0 {
+			return true
+		}
+	}
+
+	// Text-based signals
+	mfaTextSignals := []string{
+		"verification code", "two-factor", "2fa", "otp",
+		"authenticator", "verify your identity", "enter the code",
+		"security code", "bestätigungscode", "zwei-faktor",
+	}
+
+	bodyText, err := page.Locator("body").InnerText()
+	if err == nil {
+		bodyLower := strings.ToLower(bodyText)
+		for _, signal := range mfaTextSignals {
+			if strings.Contains(bodyLower, signal) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// waitForMFA pauses execution and instructs the user to complete the
+// MFA challenge manually in the visible browser window.
+func waitForMFA(page playwright.Page, timeoutSeconds int) error {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 180
+	}
+
+	fmt.Println("\n   ┌─────────────────────────────────────────────────")
+	fmt.Println("   │ 🔐 MFA / TWO-FACTOR AUTHENTICATION DETECTED!")
+	fmt.Println("   │ Please complete the verification in the browser.")
+	fmt.Printf("   │ ⏰ Timeout: %d seconds\n", timeoutSeconds)
+	fmt.Println("   └─────────────────────────────────────────────────")
+
+	preURL := page.URL()
+	elapsed := 0
+	for elapsed < timeoutSeconds {
+		humanDelay(3000, 4000) // Poll every 3-4 seconds
+		elapsed += 4
+
+		// MFA is complete if we navigated away or MFA elements disappeared
+		if page.URL() != preURL || !detectMFA(page) {
+			fmt.Println("   ✅ MFA completed! Continuing...")
+			return nil
+		}
+
+		if elapsed%20 == 0 {
+			fmt.Printf("   ⏳ Still waiting for MFA completion... (%ds/%ds)\n", elapsed, timeoutSeconds)
+		}
+	}
+
+	return fmt.Errorf("MFA timeout after %d seconds", timeoutSeconds)
+}
+
 // handleAuthWall attempts to log in using stored or prompted credentials.
 // Returns true if login was attempted, false if no auth wall was detected.
 func handleAuthWall(page playwright.Page, jobURL string) bool {
@@ -163,14 +328,14 @@ func handleAuthWall(page playwright.Page, jobURL string) bool {
 		// Save new credentials for next time
 		creds[domain] = domainCredentials{Email: email, Password: password}
 		saveCredentials(creds)
-		fmt.Printf("   💾 Credentials saved to %s for future use.\n", credentialsFile)
+		fmt.Printf("   💾 Credentials saved to encrypted vault for future use.\n")
 	}
 
 	// ----- Dismiss Cookies BEFORE Filling Login Form -----
 	// Many portals (like Siemens Energy) show a cookie banner ON the login page
 	// that covers the login button. Must be dismissed first.
 	dismissCookies(page)
-	time.Sleep(500 * time.Millisecond)
+	humanDelay(400, 800)
 
 	// ----- Fill Login Form -----
 	fmt.Println("   ✍️  Filling login form...")
@@ -224,7 +389,7 @@ func handleAuthWall(page playwright.Page, jobURL string) bool {
 
 	// Dismiss cookies again right before clicking (banners can reappear)
 	dismissCookies(page)
-	time.Sleep(300 * time.Millisecond)
+	humanDelay(200, 500)
 
 	// Snapshot URL to detect if login succeeds
 	preLoginURL := page.URL()
@@ -285,7 +450,7 @@ func handleAuthWall(page playwright.Page, jobURL string) bool {
 
 	if !loginClicked {
 		// Check if the page changed anyway (race condition: click may have worked despite error)
-		time.Sleep(2 * time.Second)
+		humanDelay(1500, 3000)
 		if page.URL() != preLoginURL {
 			fmt.Println("   ✅ Page changed — login may have succeeded.")
 			loginClicked = true
@@ -300,14 +465,34 @@ func handleAuthWall(page playwright.Page, jobURL string) bool {
 	page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
 		State: playwright.LoadStateDomcontentloaded,
 	})
-	time.Sleep(4 * time.Second)
+	humanDelay(2000, 3000)
+
+	// ----- CAPTCHA Check (Post-Login Click) -----
+	if detectCaptcha(page) {
+		if err := waitForCaptchaSolution(page, 120); err != nil {
+			fmt.Printf("   ⚠️  %v\n", err)
+			fmt.Println("   Leaving browser open for manual intervention.")
+			return true
+		}
+		humanDelay(2000, 3000)
+	}
+
+	// ----- MFA Check (Post-Login) -----
+	if detectMFA(page) {
+		if err := waitForMFA(page, 180); err != nil {
+			fmt.Printf("   ⚠️  %v\n", err)
+			fmt.Println("   Leaving browser open for manual intervention.")
+			return true
+		}
+		humanDelay(2000, 3000)
+	}
 
 	// ----- Check for Login Failure -----
 	// If a password field still exists, login probably failed
 	if detectAuthWall(page) {
 		fmt.Println("   ❌ Login appears to have FAILED (still on login page).")
 		fmt.Println("   ⚠️  Possible wrong password. Leaving browser open for manual intervention.")
-		fmt.Println("   💡 TIP: Delete the entry in credentials.json and try again.")
+		fmt.Println("   💡 TIP: Credentials will be re-prompted on next run.")
 
 		// Remove the bad credentials so they're not reused
 		delete(creds, domain)
@@ -327,7 +512,7 @@ func handleAuthWall(page playwright.Page, jobURL string) bool {
 		page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
 			State: playwright.LoadStateDomcontentloaded,
 		})
-		time.Sleep(3 * time.Second)
+		humanDelay(2000, 4000)
 	}
 
 	return true

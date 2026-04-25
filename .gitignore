@@ -4,6 +4,20 @@ agent_profile.json
 qa_memory.json
 credentials.json
 
+# Encrypted vaults and encryption key
+*.enc
+.jobagent.key
+
+# CV and personal data
+my_cv.txt
+cvs/
+targets.txt
+translations.json
+
+# Audit logs
+audit.log
+audit_anonymized.log
+
 # Binaries and executables
 *.exe
 JobAgent

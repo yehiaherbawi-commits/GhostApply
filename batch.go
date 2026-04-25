@@ -23,6 +23,13 @@ func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitG
 	defer wg.Done()
 
 	for url := range jobs {
+		// Check token budget before processing
+		if GlobalBudget.Check() {
+			fmt.Printf("⚠️  [Worker %d] Token budget exceeded — stopping.\n", id)
+			results <- JobResult{URL: url, Error: fmt.Errorf("token budget exceeded")}
+			continue
+		}
+
 		fmt.Printf("⚡ [Worker %d] Processing: %s\n", id, url)
 
 		text, err := ScrapeJob(browser, url)
@@ -39,14 +46,25 @@ func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitG
 
 		var finalCV *CVContent
 
-		// MULTI-AGENT LOOP
+		// MULTI-AGENT LOOP with BEST-DRAFT TRACKING
 		if eval.Score >= 4.0 {
 			fmt.Printf("   ✍️  [Worker %d] AI Writer drafting tailored CV...\n", id)
 			draft, _ := TailorCV(text, cv, "")
+
+			// Track the best draft across all attempts
+			var bestDraft *CVContent
+			bestScore := 0
+
 			if draft != nil {
+				bestDraft = draft // First draft is the initial best
+
 				fmt.Printf("   🕵️  [Worker %d] AI Critic reviewing draft...\n", id)
 				review, _ := ReviewCV(text, draft)
 				attempts := 1
+
+				if review != nil {
+					bestScore = review.Score
+				}
 
 				// If the Critic rejects it, loop and force a rewrite! (Max 3 rewrites)
 				for review != nil && !review.Approved && attempts <= 3 {
@@ -56,16 +74,21 @@ func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitG
 					if draft != nil {
 						fmt.Printf("   🕵️  [Worker %d] AI Critic reviewing revised draft...\n", id)
 						review, _ = ReviewCV(text, draft)
+						// Keep the highest-scored draft
+						if review != nil && review.Score > bestScore {
+							bestScore = review.Score
+							bestDraft = draft
+						}
 					}
 					attempts++
 				}
 
 				if review != nil && review.Approved {
 					fmt.Printf("   ✨ [Worker %d] Critic APPROVED final draft for %s!\n", id, eval.Company)
-					finalCV = draft
+					finalCV = draft // Use the approved draft
 				} else {
-					fmt.Printf("   ⚠️  [Worker %d] Critic did not approve %s. Using best-effort draft.\n", id, eval.Company)
-					finalCV = draft
+					fmt.Printf("   ⚠️  [Worker %d] Critic did not approve %s. Using best-scored draft (score: %d).\n", id, eval.Company, bestScore)
+					finalCV = bestDraft // Use the BEST draft, not the last
 				}
 			}
 		}

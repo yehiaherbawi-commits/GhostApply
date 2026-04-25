@@ -7,12 +7,53 @@ import (
 	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/generative-ai-go/genai"
 	"github.com/playwright-community/playwright-go"
 	"google.golang.org/api/option"
 )
+
+// ============================================================================
+// TOKEN BUDGET — AI Cost Control
+// ============================================================================
+
+// TokenBudget tracks estimated token usage across all Gemini API calls.
+type TokenBudget struct {
+	mu            sync.Mutex
+	EstimatedUsed int64
+	MaxTokens     int64
+	Exceeded      bool
+}
+
+// GlobalBudget is the shared budget across all workers and AI calls.
+// Default: 1,000,000 tokens (adjustable via config).
+var GlobalBudget = &TokenBudget{MaxTokens: 1_000_000}
+
+// Add increments the token counter and returns false if budget is exceeded.
+func (tb *TokenBudget) Add(tokens int64) bool {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.EstimatedUsed += tokens
+	if tb.EstimatedUsed > tb.MaxTokens {
+		tb.Exceeded = true
+		return false
+	}
+	return true
+}
+
+// Check returns true if the budget has been exceeded.
+func (tb *TokenBudget) Check() bool {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return tb.Exceeded
+}
+
+// estimateTokens provides a rough token count (1 token ≈ 4 chars for English text).
+func estimateTokens(text string) int64 {
+	return int64(len(text) / 4)
+}
 
 type Evaluation struct {
 	Company   string  `json:"company"`
@@ -50,9 +91,24 @@ func generateContentWithRetry(ctx context.Context, model *genai.GenerativeModel,
 	baseSleep := 60 * time.Second
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
+	// Check budget before making the call
+	if GlobalBudget.Check() {
+		return nil, fmt.Errorf("token budget exceeded (%d/%d estimated tokens used)", GlobalBudget.EstimatedUsed, GlobalBudget.MaxTokens)
+	}
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 		if err == nil {
+			// Track estimated token usage (prompt + response)
+			promptTokens := estimateTokens(prompt)
+			responseTokens := int64(0)
+			if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+				responseText := string(resp.Candidates[0].Content.Parts[0].(genai.Text))
+				responseTokens = estimateTokens(responseText)
+			}
+			if !GlobalBudget.Add(promptTokens + responseTokens) {
+				fmt.Printf("   ⚠️  [Budget] Token budget exceeded! Used: ~%d tokens\n", GlobalBudget.EstimatedUsed)
+			}
 			return resp, nil
 		}
 
