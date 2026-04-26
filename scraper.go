@@ -188,3 +188,40 @@ func cleanBoilerplate(text string) string {
 func ScrapeJob(browser playwright.Browser, url string) (string, error) {
 	return ExtractJobDescription(browser, url)
 }
+
+// isJobListPage detects if a URL or scraped text represents a folder/listing page instead of a single job.
+func isJobListPage(url string, text string) bool {
+	urlLower := strings.ToLower(url)
+	
+	// URL-based signals
+	if strings.Contains(urlLower, "/folderdetail") || strings.Contains(urlLower, "folderid=") {
+		return true
+	}
+	if strings.Contains(urlLower, "/jobs/list") || strings.Contains(urlLower, "/careers/search") || strings.Contains(urlLower, "/viewalljobs") {
+		return true
+	}
+
+	// Content-based signals
+	textLower := strings.ToLower(text)
+	
+	jobIdCount := strings.Count(textLower, "job id:")
+	if jobIdCount >= 2 {
+		return true
+	}
+
+	viewJobCount := strings.Count(textLower, "view job")
+	if viewJobCount >= 2 {
+		return true
+	}
+
+	applyNowCount := strings.Count(textLower, "apply now")
+	if applyNowCount >= 2 {
+		return true
+	}
+
+	if strings.Contains(textLower, "jobs found") {
+		return true
+	}
+
+	return false
+}

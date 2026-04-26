@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -26,7 +27,7 @@ func containsArg(flag string) bool {
 // getTargetURL returns the first non-flag argument (the job URL)
 func getTargetURL() string {
 	for _, arg := range os.Args[1:] {
-		if arg != "--batch" && arg != "--dry-run" && arg != "--anonymize-logs" && arg != "--onboard" && arg != "--verify" && arg != "compare" {
+		if arg != "--batch" && arg != "--dry-run" && arg != "--anonymize-logs" && arg != "--onboard" && arg != "--verify" && arg != "compare" && arg != "--crawl-list" {
 			return arg
 		}
 	}
@@ -102,6 +103,19 @@ func main() {
 			scrapedText, err := ScrapeJob(browser, targetURL)
 			if err != nil {
 				log.Fatalf("Scraper error: %v", err)
+			}
+
+			if isJobListPage(targetURL, scrapedText) {
+				if containsArg("--crawl-list") {
+					fmt.Println("🔎 Listing page detected. Auto-crawling individual jobs...")
+					crawlAndProcessJobs(pw, browser, targetURL, myCV, db)
+					return
+				} else {
+					fmt.Println("❌ The provided URL appears to be a job listing page, not a single job posting.")
+					fmt.Println("   Please use the direct URL to an individual job (e.g., .../ExternalJobDetail?id=...).")
+					fmt.Println("   If you want GhostApply to process all jobs from this list, run with --crawl-list.")
+					os.Exit(1)
+				}
 			}
 
 			// Multi-CV: Pick the best CV for this job (if cvs/ exists)
@@ -246,4 +260,79 @@ func main() {
 
 	p := tea.NewProgram(initialModel(db), tea.WithAltScreen())
 	p.Run()
+}
+
+func crawlAndProcessJobs(pw *playwright.Playwright, browser playwright.Browser, listURL string, myCV string, db *sql.DB) {
+	fmt.Println("   🕷️  Crawling listing page for job URLs...")
+	
+	page, err := browser.NewPage()
+	if err != nil {
+		fmt.Printf("❌ Failed to create page for crawling: %v\n", err)
+		return
+	}
+	defer page.Close()
+
+	_, err = page.Goto(listURL, playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+	})
+	if err != nil {
+		fmt.Printf("❌ Failed to navigate to listing page: %v\n", err)
+		return
+	}
+
+	links, err := page.Locator("a").All()
+	if err != nil {
+		fmt.Printf("❌ Failed to find links: %v\n", err)
+		return
+	}
+
+	var jobURLs []string
+	seen := make(map[string]bool)
+
+	importNetURL := false // Just to avoid unused import errors if we did strings processing manually.
+	_ = importNetURL
+
+	// Actually, let's just do a naive prefix check instead of importing net/url to avoid adding more imports at the top
+	// and potentially causing compilation errors if we don't manage the imports correctly via replace_file_content.
+	for _, link := range links {
+		href, err := link.GetAttribute("href")
+		if err != nil || href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") {
+			continue
+		}
+		
+		// Very naive base URL prepending for relative links
+		if strings.HasPrefix(href, "/") {
+			parts := strings.Split(listURL, "/")
+			if len(parts) >= 3 {
+				baseURL := parts[0] + "//" + parts[2]
+				href = baseURL + href
+			}
+		}
+
+		hrefLower := strings.ToLower(href)
+		// SuccessFactors specific and general heuristics
+		if strings.Contains(hrefLower, "job") || strings.Contains(hrefLower, "career") || strings.Contains(hrefLower, "position") || strings.Contains(hrefLower, "posting") || strings.Contains(hrefLower, "detail") || strings.Contains(hrefLower, "apply") {
+			// Avoid the current listing page
+			if hrefLower != strings.ToLower(listURL) && !seen[href] {
+				seen[href] = true
+				jobURLs = append(jobURLs, href)
+			}
+		}
+	}
+
+	if len(jobURLs) == 0 {
+		fmt.Println("   ⚠️  Could not find any obvious job links on the page.")
+		return
+	}
+
+	fmt.Printf("   ✅ Found %d potential job links. Saving to temp_targets.txt and starting batch process...\n", len(jobURLs))
+	
+	err = os.WriteFile("temp_targets.txt", []byte(strings.Join(jobURLs, "\n")), 0644)
+	if err != nil {
+		fmt.Printf("❌ Failed to create temp targets file: %v\n", err)
+		return
+	}
+	defer os.Remove("temp_targets.txt")
+
+	RunBatch(pw, browser, db, "temp_targets.txt", myCV)
 }
