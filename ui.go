@@ -93,8 +93,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.viewingMd && len(m.apps) > 0 {
 				selected := m.apps[m.cursor]
 				// We don't save PDF path directly, but we know the naming convention
-				safeName := strings.ReplaceAll(selected.Company, " ", "_")
-				filename := fmt.Sprintf("Resume_%s.pdf", safeName)
+				safeCompany := strings.ReplaceAll(selected.Company, " ", "_")
+				safeRole := strings.ReplaceAll(selected.Role, " ", "_")
+				if len(safeRole) > 30 {
+					safeRole = safeRole[:30]
+				}
+				filename := fmt.Sprintf("Resume_%s_%s.pdf", safeCompany, safeRole)
 				if _, err := os.Stat(filename); os.IsNotExist(err) {
 					m.errMsg = fmt.Sprintf("File not found: %s", filename)
 				} else {

@@ -79,6 +79,22 @@ func ExtractJobDescription(browser playwright.Browser, url string) (string, erro
 	// Small delay for dynamic content to render
 	humanDelay(1000, 2000)
 
+	// Accept cookies to unlock JavaScript-rendered JD content
+	dismissCookies(page)
+	humanDelay(1000, 2000)
+
+	// Poll for content to actually render (SuccessFactors loads JD via AJAX)
+	for i := 0; i < 10; i++ {
+		contentLoc := page.Locator("#content").First()
+		if count, _ := contentLoc.Count(); count > 0 {
+			text, _ := contentLoc.InnerText()
+			if len(strings.TrimSpace(text)) > 200 {
+				break
+			}
+		}
+		humanDelay(500, 1000)
+	}
+
 	// Strategy 1: Try specific JD container selectors
 	for _, sel := range jdSelectors {
 		loc := page.Locator(sel).First()
@@ -223,5 +239,36 @@ func isJobListPage(url string, text string) bool {
 		return true
 	}
 
+	return false
+}
+
+// isValidJD checks if the scraped text contains typical job description markers.
+func isValidJD(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) < 200 {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	
+	// All recognized job description section markers in English and German
+	signals := []string{
+		// English
+		"responsibilities", "requirements", "qualifications",
+		"about the role", "what you bring", "your day",
+		"we are looking for", "role summary", "key responsibilities",
+		
+		// German
+		"ihre aufgaben", "aufgaben", "was sie bei uns tun",
+		"was sie mitbringen", "ihr profil", "qualifikation",
+		"anforderungen", "wir bieten", "das bringen sie mit",
+		"stellenbeschreibung", "stellenprofil", "was wir erwarten",
+		"ihre aufgaben umfassen", "das ist ihre rolle",
+	}
+	
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
 	return false
 }

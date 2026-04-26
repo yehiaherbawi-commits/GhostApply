@@ -39,6 +39,12 @@ func worker(id int, jobs <-chan string, results chan<- JobResult, wg *sync.WaitG
 			continue
 		}
 
+		if !isValidJD(text) {
+			fmt.Printf("   ⚠️  [Worker %d] Invalid job description detected for %s. Skipping.\n", id, url)
+			results <- JobResult{URL: url, Error: fmt.Errorf("invalid job description content")}
+			continue
+		}
+
 		eval, err := EvaluateJob(text, cv)
 		if err != nil {
 			results <- JobResult{URL: url, Error: fmt.Errorf("eval failed: %v", err)}
@@ -156,8 +162,13 @@ func RunBatch(pw *playwright.Playwright, browser playwright.Browser, db *sql.DB,
 
 			// Generate the PDF using the pre-approved CV from the worker!
 			if res.TailoredCV != nil {
-				safeName := strings.ReplaceAll(res.Eval.Company, " ", "_")
-				GeneratePDF(pw, res.TailoredCV, fmt.Sprintf("Resume_%s.pdf", safeName))
+				safeCompany := strings.ReplaceAll(res.Eval.Company, " ", "_")
+				safeRole := strings.ReplaceAll(res.Eval.Role, " ", "_")
+				if len(safeRole) > 30 {
+					safeRole = safeRole[:30]
+				}
+				pdfName := fmt.Sprintf("Resume_%s_%s.pdf", safeCompany, safeRole)
+				GeneratePDF(pw, res.TailoredCV, pdfName)
 			}
 		}
 	}()
